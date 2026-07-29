@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * ESP32 Automated Test Fixture Controller — V5.3  (sketch: TestFixtureV5_3.ino)
+ * ESP32 Automated Test Fixture Controller — V6  (sketch: TestFixtureV5_3.ino)
  * ============================================================================
  *
  * V5.3 = V5_2 (non-blocking LC task architecture)
@@ -107,7 +107,7 @@ static const uint8_t  SERVO_LEDC_CHANNEL  = 0;   // used only on Arduino-ESP32 v
 #define MAX_PROFILE_CYCLES  32    // Max entries in explicit cycle list
 
 #define NVS_MAGIC        0xC0BEEF02u
-#define NVS_VERSION      5u          // bumped: added servo + break-beam config fields
+#define NVS_VERSION      6u          // bumped: added analog break-beam mode/threshold/hysteresis
 #define SEQ_MAGIC        0x5E900006u // bumped: added IF/FOR/WHILE control flow
 
 #define LC_RING_CAP      512
@@ -320,6 +320,14 @@ struct Config {
   // (input-only GPIO 34/35/36/39 ignore this and need an external pull-up).
   bool     break1UsePullup = false;
   bool     break2UsePullup = false;
+  // Sensing mode + analog threshold (per channel). Same terminal serves either
+  // sensor: mode 0 = DIGITAL (E3F-DS30C4 etc.), mode 1 = ANALOG through-beam.
+  uint8_t  break1Mode = 0;
+  uint8_t  break2Mode = 0;
+  uint16_t break1Threshold = 2048;   // ANALOG ADC trip point (0..4095)
+  uint16_t break2Threshold = 2048;
+  uint16_t break1Hyst = 150;         // ANALOG +/- hysteresis band
+  uint16_t break2Hyst = 150;
 
   // Named positions (XA..XD)
   long namedPositions[NUM_NAMED_POS] = {0, 0, 0, 0};
@@ -445,6 +453,7 @@ TaskHandle_t taskLcSampleHandle = nullptr;
 
 Preferences prefs;
 volatile bool inUploadMode = false;
+volatile bool g_lcRawMode = false;  // true = stream raw ADC counts, false = calibrated units
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -685,6 +694,13 @@ float lc_read(int samples = 3) {
   return v;
 }
 
+float lc_read_raw(int samples = 1) {
+  if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
+  float v = lc.read_average(samples);
+  if (lcMutex) xSemaphoreGive(lcMutex);
+  return v;
+}
+
 uint16_t lc_ring_count() {
   if (lcRingMux) xSemaphoreTake(lcRingMux, portMAX_DELAY);
   uint16_t n = (uint16_t)((LC_RING_CAP + lcRingHead - lcRingTail) % LC_RING_CAP);
@@ -871,7 +887,12 @@ bool lc_inMotionRead(const TestStep &step, long pos, bool doLog) {
       //              (unsigned long)millis(), cyclesDone, cyclesGoal,
       //              currentStepIdx, numSteps,
        //             pos, val);
-      Serial.printf("%lu,  %d,  %ld, %.4f\n", (unsigned long)millis(), cyclesDone, pos, val);
+      //Serial.printf("%lu,  %d,  %ld, %.4f\n", (unsigned long)millis(), cyclesDone, pos, val);
+      if (g_lcRawMode){
+        Serial.printf("[CAL] pos=%ld raw=%.2f\n", pos, val);
+      } else {
+        Serial.printf("%lu,  %d,  %ld, %.4f\n", (unsigned long)millis(), cyclesDone, pos, val);
+      }
       //LINK_UART.printf("%lu,  %d,  %ld, %.4f\n", (unsigned long)millis(), cyclesDone, pos, val);
       LINK_UART.printf("D pos=%ld lc=%.4f\n", pos, val);  // D = Data point (in-motion)
     }
@@ -968,8 +989,14 @@ void break_applyConfig() {
   lockCfg();
   g_break1.activeLow = cfg.break1ActiveLow;
   g_break1.usePullup = cfg.break1UsePullup;
+  g_break1.mode       = (BeamMode)cfg.break1Mode;
+  g_break1.threshold  = cfg.break1Threshold;
+  g_break1.hysteresis = cfg.break1Hyst;
   g_break2.activeLow = cfg.break2ActiveLow;
   g_break2.usePullup = cfg.break2UsePullup;
+  g_break2.mode       = (BeamMode)cfg.break2Mode;
+  g_break2.threshold  = cfg.break2Threshold;
+  g_break2.hysteresis = cfg.break2Hyst;
   unlockCfg();
   g_break1.begin();
   g_break2.begin();
@@ -982,6 +1009,7 @@ void break_applyConfig() {
 void printHelp() {
   Serial.println(F(
     "\n============ COMMANDS ============\n"
+    "TestFixtureV6\n"
     "GLOBAL (any mode):\n"
     "  help | status | flush lc\n"
     "  mode setup | adj | live\n"
@@ -1071,13 +1099,19 @@ void printHelp() {
     "  set break2_active_low <0|1>  -- Break-beam 2 active level\n"
     "  set break1_pullup <0|1>   -- Break-beam 1 INPUT_PULLUP (only if pin supports it)\n"
     "  set break2_pullup <0|1>   -- Break-beam 2 INPUT_PULLUP\n"
+    "  set break1_mode <0|1>     -- 0=DIGITAL (E3F-DS30C4), 1=ANALOG through-beam\n"
+    "  set break2_mode <0|1>     -- (same terminal serves either sensor)\n"
+    "  set break1_threshold <0..4095>  -- ANALOG trip point (light level)\n"
+    "  set break2_threshold <0..4095>\n"
+    "  set break1_hyst <0..2048> -- ANALOG hysteresis band (anti-chatter)\n"
+    "  set break2_hyst <0..2048>\n"
     "\nADJUSTMENTS MODE:\n"
     "  jog <steps>               -- Jog (+ or -); prints position live\n"
     "  goto <steps|XA..XD>\n"
     "  setpos home                   -- Set current position as step 0\n"
     "  setpos XA [<steps>]       -- Save position as named variable\n"
     "  listpos\n"
-    "  tare | cal weight <val> | cal clear | cal preset | read lc\n"
+    "  tare | cal weight <val> | cal clear | cal preset | read lc | read lc raw\n"
     "  seek force <f> [vmax] [creep]  -- PI+D seek (uses set seek_* defaults)\n"
     "  seek stop | flush lc\n"
     "  cal upload <idx>          -- Bulk cal entry from slot <idx>; lines: <raw>;<weight>; END\n"
@@ -2031,13 +2065,18 @@ void handleServoCommand(const String &args) {
  */
 void handleReadBreakCommand(const String &args) {
   auto reportOne = [](int which, const BreakBeamSensor &s) {
-    int lvl = s.rawLevel();
     bool broken = s.isBroken();
-    Serial.printf("[BB%d] pin=%d  raw=%d  %s%s\n",
-                  which, s.pin, lvl,
-                  broken ? "BROKEN" : "CLEAR",
-                  s.usePullup ? "  (pullup)" : "");
-    
+    if (s.mode == BeamMode::Digital) {
+      Serial.printf("[BB%d] pin=%d  DIGITAL  raw=%d  %s%s\n",
+                    which, s.pin, s.rawLevel(),
+                    broken ? "BROKEN" : "CLEAR",
+                    s.usePullup ? "  (pullup)" : "");
+    } else {
+      Serial.printf("[BB%d] pin=%d  ANALOG   adc=%d  thr=%u+/-%u  %s\n",
+                    which, s.pin, s.rawLevel(),
+                    s.threshold, s.hysteresis,
+                    broken ? "BROKEN" : "CLEAR");
+    }
   };
 
   if (args.length() == 0 || args == "bb") {
@@ -2212,6 +2251,12 @@ void handleCommand(const String &rawLine) {
       else if (key == "break2_active_low")  { cfg.break2ActiveLow = (val.toInt() != 0); g_break2.activeLow = cfg.break2ActiveLow;  Serial.printf("break2_active_low    -> %d\n", (int)cfg.break2ActiveLow); }
       else if (key == "break1_pullup")      { cfg.break1UsePullup = (val.toInt() != 0); g_break1.usePullup = cfg.break1UsePullup;  g_break1.begin();  Serial.printf("break1_pullup        -> %d\n", (int)cfg.break1UsePullup); }
       else if (key == "break2_pullup")      { cfg.break2UsePullup = (val.toInt() != 0); g_break2.usePullup = cfg.break2UsePullup;  g_break2.begin();  Serial.printf("break2_pullup        -> %d\n", (int)cfg.break2UsePullup); }
+      else if (key == "break1_mode")        { cfg.break1Mode = (uint8_t)(val.toInt() ? 1 : 0); g_break1.mode = (BeamMode)cfg.break1Mode; g_break1.begin(); Serial.printf("break1_mode          -> %s\n", cfg.break1Mode ? "ANALOG" : "DIGITAL"); }
+      else if (key == "break2_mode")        { cfg.break2Mode = (uint8_t)(val.toInt() ? 1 : 0); g_break2.mode = (BeamMode)cfg.break2Mode; g_break2.begin(); Serial.printf("break2_mode          -> %s\n", cfg.break2Mode ? "ANALOG" : "DIGITAL"); }
+      else if (key == "break1_threshold")   { cfg.break1Threshold = (uint16_t)constrain(val.toInt(), 0, 4095); g_break1.threshold = cfg.break1Threshold; Serial.printf("break1_threshold     -> %u\n", cfg.break1Threshold); }
+      else if (key == "break2_threshold")   { cfg.break2Threshold = (uint16_t)constrain(val.toInt(), 0, 4095); g_break2.threshold = cfg.break2Threshold; Serial.printf("break2_threshold     -> %u\n", cfg.break2Threshold); }
+      else if (key == "break1_hyst")        { cfg.break1Hyst = (uint16_t)constrain(val.toInt(), 0, 2048); g_break1.hysteresis = cfg.break1Hyst; Serial.printf("break1_hyst          -> %u\n", cfg.break1Hyst); }
+      else if (key == "break2_hyst")        { cfg.break2Hyst = (uint16_t)constrain(val.toInt(), 0, 2048); g_break2.hysteresis = cfg.break2Hyst; Serial.printf("break2_hyst          -> %u\n", cfg.break2Hyst); }
       else Serial.println(F("Unknown 'set' field."));
       unlockCfg();
       return;
@@ -2302,9 +2347,13 @@ void handleCommand(const String &rawLine) {
       //const float rP[] = {-679135.20f,-322304.55f,42789.00f,299100.41f,309657.00f,
       //                     348070.59f,417649.81f,490064.59f,586401.19f,715813.00f};
       //const float wP[] = {-30.00f,-15.00f,0.00f,10.30f,10.71f,12.27f,15.09f,18.00f,21.70f,26.80f};
-      const float rP[] = {-699034.80f,-514919.2f,-333225.2f,-153952.8f,-65224.7f,
-                           110415.3f,197327.2f,369334.8f,538920.8f,706085.2f};
-      const float wP[] = {-40.00f,-30.00f,-20.00f,-10.00f,-5.00f,5.00f,10.00f,20.00f,30.00f,40.00f};
+      // const float rP[] = {-699034.80f,-514919.2f,-333225.2f,-153952.8f,-65224.7f,
+      //                      110415.3f,197327.2f,369334.8f,538920.8f,706085.2f};
+      // const float wP[] = {-40.00f,-30.00f,-20.00f,-10.00f,-5.00f,5.00f,10.00f,20.00f,30.00f,40.00f};
+      const float rP[] = {-2813803.75f, -2189222.25f, -1564640.75f, -940059.31f, -315477.81f,
+                    309103.69f, 933685.19f, 1558266.75f, 2182848.25f, 2807429.75f};
+      const float wP[] = {-160.32f, -124.64f, -89.12f, -53.44f, -17.76f,
+                    17.76f, 53.44f, 89.12f, 124.64f, 160.32f};
       for (int i = 0; i < LC_INDEX_SIZE; i++) { cfg.lc_calRaw[i]=rP[i]; cfg.lc_calWeight[i]=wP[i]; cfg.lc_calUsed[i]=true; }
       lc_applyCalibration(); unlockCfg(); lc_printMatrix(); return;
     }
@@ -2315,6 +2364,10 @@ void handleCommand(const String &rawLine) {
       LINK_UART.printf("R pos=%ld lc=%.4f\n", stepper.currentPosition(), w);  // R=Result
       return;
     }
+    if (sl == "read lc raw") { Serial.printf("[LC] raw=%.2f\n", lc_read_raw(5)); return; }
+    if (sl == "lc raw on")  { g_lcRawMode = true;  Serial.println(F("[LC] Raw mode ON — streaming raw ADC counts.")); return; }
+    if (sl == "lc raw off") { g_lcRawMode = false; Serial.println(F("[LC] Raw mode OFF — streaming calibrated units.")); return; }
+    
     // read bb | read bb1 | read bb2
     if (sl.startsWith("read bb")) {
       String args = sl.substring(5); args.trim();   // "bb", "bb1", "bb2"
@@ -2967,7 +3020,7 @@ void taskLcSample(void *pv) {
 
     // ---- Take one sample (blocks for one HX711 conversion on this task) ----
     long  pos = stepper.currentPosition();
-    float val = lc_read(1);
+    float val = g_lcRawMode ? lc_read_raw(1) : lc_read(1);
     lastLcValue = val;
 
     // Write to cache — consumed non-blocking by taskControl
@@ -3162,9 +3215,12 @@ void setup() {
   // Servo + break-beam init (must run AFTER loadConfig so we pick up calibrated pulses).
   servo_init();
   break_applyConfig();
-  Serial.printf("[BB] pin1=%d (act_low=%d pullup=%d)  pin2=%d (act_low=%d pullup=%d)\n",
-                BREAK1_PIN, cfg.break1ActiveLow, cfg.break1UsePullup,
-                BREAK2_PIN, cfg.break2ActiveLow, cfg.break2UsePullup);
+  Serial.printf("[BB] pin1=%d (%s act_low=%d pullup=%d thr=%u+/-%u)  "
+                "pin2=%d (%s act_low=%d pullup=%d thr=%u+/-%u)\n",
+                BREAK1_PIN, cfg.break1Mode ? "ANALOG" : "DIGITAL",
+                cfg.break1ActiveLow, cfg.break1UsePullup, cfg.break1Threshold, cfg.break1Hyst,
+                BREAK2_PIN, cfg.break2Mode ? "ANALOG" : "DIGITAL",
+                cfg.break2ActiveLow, cfg.break2UsePullup, cfg.break2Threshold, cfg.break2Hyst);
 
   delay(200);
   printHelp();
