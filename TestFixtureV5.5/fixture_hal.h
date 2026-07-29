@@ -140,25 +140,84 @@ struct ServoActuator final : IActuator {
  * usePullup is honored only if the chosen pin supports it (input-only pins
  * 34/35/36/39 do not — caller is responsible for an external pull-up there).
  */
+// Break-beam sensing mode.
+//   DIGITAL : one signal wire, HIGH/LOW output (E3F-DS30C4 and other NPN/photo
+//             modules). Uses digitalRead() + activeLow polarity.
+//   ANALOG  : through-beam receiver whose output tracks received light level.
+//             Uses analogRead() + threshold. "broken" latches with hysteresis.
+enum class BeamMode : uint8_t { Digital = 0, Analog = 1 };
+
 struct BreakBeamSensor final : ISensor {
   const int pin;
-  bool      activeLow = true;
-  bool      usePullup = false;
+  bool      activeLow = true;   // DIGITAL: LOW == broken.
+                                // ANALOG:  broken when reading < threshold.
+  bool      usePullup = false;  // DIGITAL only (ignored on input-only 34/35/36/39).
+
+  // ---- ANALOG mode configuration ----
+  BeamMode  mode        = BeamMode::Digital;
+  uint16_t  threshold   = 2048; // ADC trip point (0..4095, 12-bit)
+  uint16_t  hysteresis  = 150;  // +/- band around threshold (0 = none)
+  // Analog sampling: peak-hold over a burst. Pulsed/modulated beams read high
+  // only during a pulse, so a MAX over a window spanning several pulses cleanly
+  // separates "beam present" from "blocked" where a single sample or short mean
+  // cannot. sampleCount * sampleGapUs sets the window (~40*200us = 8ms).
+  uint8_t   sampleCount = 40;
+  uint16_t  sampleGapUs = 200;
+
+  // Latched broken-state for analog hysteresis. mutable so isBroken() stays
+  // const and keeps working through the existing const& call sites.
+  mutable bool m_brokenLatched = false;
 
   BreakBeamSensor(int p, bool actLow, bool pullup)
     : pin(p), activeLow(actLow), usePullup(pullup) {}
 
   void begin() {
     if (pin < 0) return;
-    pinMode(pin, usePullup ? INPUT_PULLUP : INPUT);
+    if (mode == BeamMode::Digital) pinMode(pin, usePullup ? INPUT_PULLUP : INPUT);
+    else                           pinMode(pin, INPUT);   // analog: no pull-up
+    m_brokenLatched = false;
   }
 
-  int rawLevel() const { return (pin < 0) ? -1 : digitalRead(pin); }
+  // Peak (max) over a short burst spread across the beam's modulation period.
+  // Robust to the deep downward excursions a pulsed emitter produces while the
+  // beam is CLEAR -- only whether the signal *reaches* high matters.
+  int readAnalogPeak() const {
+    int n = (sampleCount < 1) ? 1 : sampleCount;
+    int peak = 0;
+    for (int i = 0; i < n; ++i) {
+      int v = analogRead(pin);
+      if (v > peak) peak = v;
+      if (sampleGapUs) delayMicroseconds(sampleGapUs);
+    }
+    return peak;
+  }
+
+  // Diagnostic raw value: digital level (DIGITAL) or peak ADC (ANALOG).
+  int rawLevel() const {
+    if (pin < 0) return -1;
+    return (mode == BeamMode::Digital) ? digitalRead(pin) : readAnalogPeak();
+  }
 
   bool isBroken() const {
     if (pin < 0) return false;
-    int lvl = digitalRead(pin);
-    return activeLow ? (lvl == LOW) : (lvl == HIGH);
+
+    if (mode == BeamMode::Digital) {
+      int lvl = digitalRead(pin);
+      return activeLow ? (lvl == LOW) : (lvl == HIGH);
+    }
+
+    // ANALOG: compare peak light level to threshold, with a hysteresis latch.
+    int v  = readAnalogPeak();
+    int hi = (int)threshold + (int)hysteresis;
+    int lo = (int)threshold - (int)hysteresis;
+    if (activeLow) {                 // broken == beam interrupted == low reading
+      if      (v <= lo) m_brokenLatched = true;
+      else if (v >= hi) m_brokenLatched = false;
+    } else {                         // inverted receiver: broken == high reading
+      if      (v >= hi) m_brokenLatched = true;
+      else if (v <= lo) m_brokenLatched = false;
+    }
+    return m_brokenLatched;
   }
 
   float readPrimary(int /*samples*/ = 1) override {
