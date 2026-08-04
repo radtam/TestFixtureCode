@@ -1,13 +1,16 @@
 "use strict";
 
 const PHASE_TASKS = [
-  ["Intake", "Confirm project request and requirements"],
-  ["Fixture Setup", "Prepare and inspect the test fixture"],
-  ["Test Definition", "Define the cycle sequence and cycle target"],
-  ["Calibration/Verification", "Calibrate and verify the load cell"],
-  ["Test Run", "Run the planned cycle test"],
-  ["Results Review", "Review results against acceptance criteria"],
-  ["Closeout", "Document conclusions and close the project"],
+  ["Requirements", "Confirm requirements"],
+  ["Design", "Generate code"],
+  ["Implementation", "Implement"],
+  ["Verification", "Verify the change works"],
+];
+
+const FORM_FIELDS = [
+  "id", "name", "status", "owner", "requestDate", "targetDate",
+  "problem", "requirements", "context", "relevantFiles",
+  "acceptanceCriteria", "constraints", "hardwareNotes", "notes",
 ];
 
 const state = {
@@ -17,6 +20,7 @@ const state = {
   isNew: false,
   dirty: false,
   activeTab: "overview",
+  confirmResolve: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -59,6 +63,23 @@ function showToast(message, isError = false) {
   showToast.timer = setTimeout(() => { toast.hidden = true; }, 3600);
 }
 
+function askConfirm(message, title = "Are you sure?") {
+  return new Promise((resolve) => {
+    state.confirmResolve = resolve;
+    $("#confirmTitle").textContent = title;
+    $("#confirmMessage").textContent = message;
+    $("#confirmModal").hidden = false;
+    $("#confirmYes").focus();
+  });
+}
+
+function closeConfirm(answer) {
+  $("#confirmModal").hidden = true;
+  const resolve = state.confirmResolve;
+  state.confirmResolve = null;
+  if (resolve) resolve(answer);
+}
+
 function displayStatus(value) {
   return (value || "planning").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -99,6 +120,10 @@ function makeElement(tag, className, text) {
   return element;
 }
 
+function previewText(project) {
+  return project.problem || project.requirements || project.context || "";
+}
+
 async function loadProjects() {
   try {
     const suffix = $("#showArchived").checked ? "?archived=1" : "";
@@ -112,7 +137,7 @@ async function loadProjects() {
 function renderDashboard() {
   const query = $("#searchInput").value.trim().toLowerCase();
   const visible = state.projects.filter((project) =>
-    [project.name, project.id, project.owner, project.fixtureType, project.deviceUnderTest]
+    [project.name, project.id, project.owner, project.problem, project.requirements, project.hardwareNotes]
       .some((value) => String(value || "").toLowerCase().includes(query))
   );
   const active = state.projects.filter((project) => ["planning", "active", "on_hold"].includes(project.status));
@@ -146,8 +171,12 @@ function createProjectCard(project) {
   const status = makeElement("span", `status-badge ${project.status}`, displayStatus(project.status));
   const name = makeElement("h3", "", project.name);
   const meta = makeElement("p", "project-meta");
-  const metaParts = [project.fixtureType, project.measurementType, project.owner && `Owner: ${project.owner}`].filter(Boolean);
-  meta.textContent = metaParts.join(" · ") || "No fixture or owner entered";
+  const summary = previewText(project);
+  const metaParts = [
+    summary ? summary.slice(0, 120) + (summary.length > 120 ? "…" : "") : "",
+    project.owner && `Owner: ${project.owner}`,
+  ].filter(Boolean);
+  meta.textContent = metaParts.join(" · ") || "No problem or requirements entered yet";
 
   const footer = makeElement("div", "project-card-footer");
   const progressHeader = makeElement("div", "card-progress-header");
@@ -159,11 +188,14 @@ function createProjectCard(project) {
 
   const due = makeElement("div", "card-due");
   const overdueTasks = (project.tasks || []).filter(isOverdue).length;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const targetOverdue = project.targetDate
+    && new Date(`${project.targetDate}T00:00:00`) < today
+    && project.status !== "complete";
   const target = makeElement(
     "span",
-    project.targetDate && new Date(`${project.targetDate}T00:00:00`) < new Date().setHours(0, 0, 0, 0) && project.status !== "complete"
-      ? "overdue"
-      : "",
+    targetOverdue ? "overdue" : "",
     project.targetDate ? `Target ${formatDate(project.targetDate)}` : "No target date"
   );
   due.append(target, makeElement("span", overdueTasks ? "overdue" : "", overdueTasks ? `${overdueTasks} overdue` : ""));
@@ -178,8 +210,11 @@ function showEditor() {
   window.scrollTo({ top: 0, behavior: "instant" });
 }
 
-function showDashboard() {
-  if (state.dirty && !confirm("You have unsaved changes. Leave without saving?")) return;
+async function showDashboard() {
+  if (state.dirty) {
+    const leave = await askConfirm("You have unsaved changes. Leave without saving?", "Leave project?");
+    if (!leave) return;
+  }
   state.current = null;
   state.dirty = false;
   $("#editorView").hidden = true;
@@ -196,6 +231,7 @@ function newProject() {
   $("#projectForm").reset();
   $("#projectForm").elements.status.value = "planning";
   $("#projectForm").elements.requestDate.value = new Date().toISOString().slice(0, 10);
+  $("#projectForm").elements.id.readOnly = false;
   $("#editorProjectId").textContent = "NEW PROJECT";
   $("#editorTitle").textContent = "Project intake";
   $("#archiveButton").textContent = "Archive project";
@@ -229,12 +265,8 @@ async function openProject(projectId) {
 
 function populateForm(project) {
   const form = $("#projectForm");
-  [
-    "id", "name", "status", "owner", "fixtureType", "measurementType", "deviceUnderTest",
-    "purpose", "requestDate", "targetDate", "cycleTarget", "acceptanceCriteria", "risks",
-    "notes", "fileLinks",
-  ].forEach((field) => {
-    form.elements[field].value = project[field] ?? "";
+  FORM_FIELDS.forEach((field) => {
+    if (form.elements[field]) form.elements[field].value = project[field] ?? "";
   });
   form.elements.id.readOnly = true;
 }
@@ -261,6 +293,10 @@ function renderProgress() {
   });
   const summary = $("#phaseSummary");
   summary.replaceChildren();
+  if (!state.tasks.length) {
+    summary.append(makeElement("p", "muted-message", "No tasks yet. Add some only if they help you stay organized."));
+    return;
+  }
   phases.forEach((tasks, phase) => {
     const card = makeElement("div", "phase-card");
     card.append(
@@ -275,7 +311,7 @@ function renderTasks() {
   const list = $("#taskList");
   list.replaceChildren();
   if (!state.tasks.length) {
-    list.append(makeElement("p", "muted-message", "No tasks. Add a task to begin your checklist."));
+    list.append(makeElement("p", "muted-message", "No tasks. Add one if you want a checklist for this change."));
     return;
   }
   state.tasks.forEach((task, index) => {
@@ -309,12 +345,14 @@ function handleTaskInput(event) {
   renderTimeline();
 }
 
-function handleTaskAction(event) {
+async function handleTaskAction(event) {
   const row = event.target.closest(".task-row");
   const index = Number(row.dataset.index);
   const action = event.currentTarget.dataset.action;
   if (action === "remove") {
-    if (!confirm(`Remove “${state.tasks[index].title || "this task"}”?`)) return;
+    const title = state.tasks[index].title || "this task";
+    const ok = await askConfirm(`Delete “${title}”?`, "Delete task?");
+    if (!ok) return;
     state.tasks.splice(index, 1);
   } else if (action === "up" && index > 0) {
     [state.tasks[index - 1], state.tasks[index]] = [state.tasks[index], state.tasks[index - 1]];
@@ -347,8 +385,9 @@ function addTask() {
 
 function projectFromForm() {
   const data = Object.fromEntries(new FormData($("#projectForm")).entries());
-  data.cycleTarget = Number(data.cycleTarget || 0);
-  data.tasks = state.tasks.map((task, order) => ({ ...task, order }));
+  data.tasks = state.tasks
+    .filter((task) => task.title.trim())
+    .map((task, order) => ({ ...task, title: task.title.trim(), order }));
   if (state.current) {
     data.createdAt = state.current.createdAt;
     data.history = state.current.history;
@@ -356,14 +395,54 @@ function projectFromForm() {
   return data;
 }
 
+function buildAiBrief(project) {
+  const sections = [
+    ["Project", project.name],
+    ["Problem", project.problem],
+    ["Requirements", project.requirements],
+    ["Context", project.context],
+    ["Relevant files", project.relevantFiles],
+    ["Acceptance criteria", project.acceptanceCriteria],
+    ["Constraints", project.constraints],
+    ["Hardware / fixture notes", project.hardwareNotes],
+    ["Notes", project.notes],
+  ];
+  const lines = [
+    "Please help with this cycle test machine code change.",
+    "",
+  ];
+  sections.forEach(([label, value]) => {
+    if (String(value || "").trim()) {
+      lines.push(`## ${label}`);
+      lines.push(String(value).trim());
+      lines.push("");
+    }
+  });
+  return lines.join("\n").trim() + "\n";
+}
+
+async function copyAiBrief() {
+  const project = projectFromForm();
+  if (!project.name.trim()) {
+    showToast("Add a project name before copying the brief.", true);
+    return;
+  }
+  const brief = buildAiBrief(project);
+  if (brief.trim() === "Please help with this cycle test machine code change.") {
+    showToast("Add a problem, requirements, or context first.", true);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(brief);
+    showToast("AI brief copied. Paste it into your chat when you are ready.");
+  } catch (error) {
+    showToast("Could not copy to the clipboard.", true);
+  }
+}
+
 async function saveProject() {
   const form = $("#projectForm");
   if (!form.reportValidity()) return;
-  if (state.tasks.some((task) => !task.title.trim())) {
-    switchTab("tasks");
-    showToast("Every task needs a title.", true);
-    return;
-  }
   const payload = projectFromForm();
   $("#saveButton").disabled = true;
   $("#saveState").textContent = "Saving…";
@@ -409,7 +488,7 @@ function renderTimeline() {
     .filter((task) => task.dueDate && task.status !== "done")
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   if (!scheduled.length) {
-    upcoming.append(makeElement("p", "muted-message", "Add due dates to tasks to build the schedule."));
+    upcoming.append(makeElement("p", "muted-message", "Add due dates to tasks if you want a schedule."));
   } else {
     scheduled.forEach((task) => {
       const item = makeElement("div", "upcoming-item");
@@ -439,7 +518,7 @@ function downloadJson(project) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${project.id}.json`;
+  link.download = `${project.id || "project"}.json`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -459,7 +538,11 @@ async function duplicateProject() {
 }
 
 async function archiveProject() {
-  if (!confirm(`Archive “${state.current.name}”? It can still be viewed by selecting Show archived.`)) return;
+  const ok = await askConfirm(
+    `Archive “${state.current.name}”? You can still find it later by selecting Show archived.`,
+    "Archive project?"
+  );
+  if (!ok) return;
   try {
     const archived = await api(`/api/projects/${encodeURIComponent(state.current.id)}/archive`, { method: "POST" });
     state.current = archived;
@@ -476,8 +559,12 @@ async function archiveProject() {
 }
 
 async function deleteProject() {
-  const confirmation = prompt(`Type DELETE to permanently remove “${state.current.name}”.`);
-  if (confirmation !== "DELETE") return;
+  $("#actionMenu").hidden = true;
+  const ok = await askConfirm(
+    `Delete “${state.current.name}”? This permanently removes the project file.`,
+    "Delete project?"
+  );
+  if (!ok) return;
   try {
     await api(`/api/projects/${encodeURIComponent(state.current.id)}`, { method: "DELETE" });
     state.dirty = false;
@@ -522,6 +609,7 @@ $("#newProjectButton").addEventListener("click", newProject);
 $("#emptyNewButton").addEventListener("click", newProject);
 $("#backButton").addEventListener("click", showDashboard);
 $("#saveButton").addEventListener("click", saveProject);
+$("#copyBriefButton").addEventListener("click", copyAiBrief);
 $("#addTaskButton").addEventListener("click", addTask);
 $("#searchInput").addEventListener("input", renderDashboard);
 $("#showArchived").addEventListener("change", loadProjects);
@@ -532,6 +620,14 @@ $("#exportButton").addEventListener("click", () => downloadJson({ ...projectFrom
 $("#duplicateButton").addEventListener("click", duplicateProject);
 $("#archiveButton").addEventListener("click", archiveProject);
 $("#deleteButton").addEventListener("click", deleteProject);
+$("#confirmYes").addEventListener("click", () => closeConfirm(true));
+$("#confirmNo").addEventListener("click", () => closeConfirm(false));
+$("#confirmModal").addEventListener("click", (event) => {
+  if (event.target === $("#confirmModal")) closeConfirm(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("#confirmModal").hidden) closeConfirm(false);
+});
 $("#moreButton").addEventListener("click", () => {
   const menu = $("#actionMenu");
   menu.hidden = !menu.hidden;

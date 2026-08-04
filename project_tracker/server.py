@@ -1,4 +1,4 @@
-"""Local file-backed server for the Cycle Test Project Tracker."""
+"""Local file-backed server for the Cycle Test Code Tracker."""
 
 from __future__ import annotations
 
@@ -27,13 +27,10 @@ PROJECT_STATUSES = {"planning", "active", "on_hold", "complete", "archived"}
 MAX_BODY_BYTES = 2_000_000
 
 DEFAULT_TASKS = [
-    ("Intake", "Confirm project request and requirements"),
-    ("Fixture Setup", "Prepare and inspect the test fixture"),
-    ("Test Definition", "Define the cycle sequence and cycle target"),
-    ("Calibration/Verification", "Calibrate and verify the load cell"),
-    ("Test Run", "Run the planned cycle test"),
-    ("Results Review", "Review results against acceptance criteria"),
-    ("Closeout", "Document conclusions and close the project"),
+    ("Requirements", "Confirm requirements"),
+    ("Design", "Generate code"),
+    ("Implementation", "Implement"),
+    ("Verification", "Verify the change works"),
 ]
 
 
@@ -165,23 +162,42 @@ def validate_project(payload: Any, existing: dict[str, Any] | None = None) -> di
         raise ValidationError("Task IDs must be unique.")
 
     now = utc_now()
+    problem = _clean_text(payload.get("problem") or payload.get("purpose"), 8_000)
+    requirements = _clean_text(payload.get("requirements"), 8_000)
+    context = _clean_text(payload.get("context"), 12_000)
+    relevant_files = _clean_text(payload.get("relevantFiles") or payload.get("fileLinks"), 8_000)
+    hardware_notes = _clean_text(payload.get("hardwareNotes"), 4_000)
+    if not hardware_notes:
+        hardware_notes = _clean_text(
+            " · ".join(
+                part
+                for part in (
+                    _clean_text(payload.get("fixtureType"), 150),
+                    _clean_text(payload.get("measurementType"), 50),
+                    _clean_text(payload.get("deviceUnderTest"), 250),
+                )
+                if part
+            ),
+            4_000,
+        )
+    constraints = _clean_text(payload.get("constraints") or payload.get("risks"), 4_000)
+
     project = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "id": project_id,
         "name": name,
         "status": status,
         "owner": _clean_text(payload.get("owner"), 100),
-        "fixtureType": _clean_text(payload.get("fixtureType"), 150),
-        "measurementType": _clean_text(payload.get("measurementType"), 50),
-        "deviceUnderTest": _clean_text(payload.get("deviceUnderTest"), 250),
-        "purpose": _clean_text(payload.get("purpose"), 4_000),
+        "problem": problem,
+        "requirements": requirements,
+        "context": context,
+        "relevantFiles": relevant_files,
+        "acceptanceCriteria": _clean_text(payload.get("acceptanceCriteria"), 4_000),
+        "constraints": constraints,
+        "hardwareNotes": hardware_notes,
         "requestDate": _clean_date(payload.get("requestDate")),
         "targetDate": _clean_date(payload.get("targetDate")),
-        "cycleTarget": max(0, int(payload.get("cycleTarget") or 0)),
-        "acceptanceCriteria": _clean_text(payload.get("acceptanceCriteria"), 4_000),
-        "risks": _clean_text(payload.get("risks"), 4_000),
         "notes": _clean_text(payload.get("notes"), 10_000),
-        "fileLinks": _clean_text(payload.get("fileLinks"), 4_000),
         "tasks": tasks,
         "createdAt": existing.get("createdAt", now) if existing else _clean_text(payload.get("createdAt"), 40) or now,
         "updatedAt": now,
@@ -191,8 +207,44 @@ def validate_project(payload: Any, existing: dict[str, Any] | None = None) -> di
     return project
 
 
+def migrate_project(raw: dict[str, Any]) -> dict[str, Any]:
+    """Convert older saved project files to the current field layout without rewriting history."""
+    if raw.get("schemaVersion", 1) >= 2 and "problem" in raw:
+        return raw
+
+    migrated = dict(raw)
+    migrated["schemaVersion"] = 2
+    migrated["problem"] = raw.get("problem") or raw.get("purpose") or ""
+    migrated["requirements"] = raw.get("requirements") or ""
+    migrated["context"] = raw.get("context") or ""
+    migrated["relevantFiles"] = raw.get("relevantFiles") or raw.get("fileLinks") or ""
+    migrated["constraints"] = raw.get("constraints") or raw.get("risks") or ""
+    if not migrated.get("hardwareNotes"):
+        hardware_parts = [
+            part
+            for part in (
+                raw.get("fixtureType") or "",
+                raw.get("measurementType") or "",
+                raw.get("deviceUnderTest") or "",
+            )
+            if part
+        ]
+        migrated["hardwareNotes"] = " · ".join(hardware_parts)
+    for obsolete in (
+        "purpose",
+        "fileLinks",
+        "risks",
+        "fixtureType",
+        "measurementType",
+        "deviceUnderTest",
+        "cycleTarget",
+    ):
+        migrated.pop(obsolete, None)
+    return migrated
+
+
 def project_for_response(project: dict[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(project)
+    result = copy.deepcopy(migrate_project(project))
     result["progress"] = calculate_progress(result.get("tasks", []))
     return result
 
@@ -524,7 +576,7 @@ class TrackerServer(ThreadingHTTPServer):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the local Cycle Test Project Tracker.")
+    parser = argparse.ArgumentParser(description="Run the local Cycle Test Code Tracker.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
@@ -533,7 +585,7 @@ def main() -> None:
 
     server = TrackerServer((args.host, args.port), ProjectStore(args.data_dir))
     url = f"http://{args.host}:{server.server_port}"
-    print(f"Project Tracker is running at {url}")
+    print(f"Code Tracker is running at {url}")
     print("Press Ctrl+C in this window to stop it.")
     if not args.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

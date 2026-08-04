@@ -17,25 +17,29 @@ from server import (  # noqa: E402
     TrackerServer,
     ValidationError,
     calculate_progress,
+    migrate_project,
     validate_project,
 )
 
 
-def sample_project(project_id: str = "latch-test") -> dict:
+def sample_project(project_id: str = "current-cycle-feature") -> dict:
     return {
         "id": project_id,
-        "name": "Latch endurance test",
+        "name": "Persist current cycle count",
         "status": "planning",
         "owner": "Test Engineering",
-        "fixtureType": "Force fixture",
-        "measurementType": "Force",
+        "problem": "The fixture does not remember the cycle it just finished.",
+        "requirements": "Store current cycle on the ESP32 and expose it to the display.",
+        "context": "This is for one active test at a time.",
+        "relevantFiles": "TestFixtureV5.5/TestFixtureV7.ino",
+        "acceptanceCriteria": "After a power cycle mid-run, the display can recover the last completed cycle.",
+        "constraints": "Do not break existing LIVE_TEST start/pause/stop behavior.",
         "targetDate": "2026-08-20",
-        "cycleTarget": 1000,
         "tasks": [
             {
-                "id": "fixture-check",
-                "phase": "Fixture Setup",
-                "title": "Inspect fixture",
+                "id": "confirm-requirements",
+                "phase": "Requirements",
+                "title": "Confirm requirements",
                 "status": "pending",
                 "owner": "",
                 "dueDate": "2026-08-05",
@@ -43,9 +47,9 @@ def sample_project(project_id: str = "latch-test") -> dict:
                 "blockedReason": "",
             },
             {
-                "id": "run-test",
-                "phase": "Test Run",
-                "title": "Run 1,000 cycles",
+                "id": "implement",
+                "phase": "Implementation",
+                "title": "Implement",
                 "status": "in_progress",
                 "owner": "",
                 "dueDate": "2026-08-15",
@@ -75,6 +79,37 @@ class ProjectValidationTests(unittest.TestCase):
         project = validate_project(sample_project())
         self.assertEqual(calculate_progress(project["tasks"]), 25)
 
+    def test_default_tasks_are_code_workflow(self):
+        project = validate_project({"name": "Blank starter"})
+        titles = [task["title"] for task in project["tasks"]]
+        self.assertEqual(
+            titles,
+            [
+                "Confirm requirements",
+                "Generate code",
+                "Implement",
+                "Verify the change works",
+            ],
+        )
+
+    def test_migrate_old_schema(self):
+        old = {
+            "schemaVersion": 1,
+            "id": "legacy",
+            "name": "Legacy",
+            "purpose": "Old purpose text",
+            "fileLinks": "a.ino",
+            "risks": "Do not break pause",
+            "fixtureType": "Torque fixture",
+            "tasks": [],
+        }
+        migrated = migrate_project(old)
+        self.assertEqual(migrated["schemaVersion"], 2)
+        self.assertEqual(migrated["problem"], "Old purpose text")
+        self.assertEqual(migrated["relevantFiles"], "a.ino")
+        self.assertEqual(migrated["constraints"], "Do not break pause")
+        self.assertEqual(migrated["hardwareNotes"], "Torque fixture")
+
 
 class ProjectStoreTests(unittest.TestCase):
     def setUp(self):
@@ -86,9 +121,10 @@ class ProjectStoreTests(unittest.TestCase):
 
     def test_create_load_and_duplicate_conflict(self):
         created = self.store.create(sample_project())
-        self.assertEqual(created["id"], "latch-test")
+        self.assertEqual(created["id"], "current-cycle-feature")
         self.assertEqual(created["progress"], 25)
-        self.assertEqual(self.store.get("latch-test")["name"], "Latch endurance test")
+        self.assertEqual(created["problem"], "The fixture does not remember the cycle it just finished.")
+        self.assertEqual(self.store.get("current-cycle-feature")["name"], "Persist current cycle count")
         with self.assertRaises(ConflictError):
             self.store.create(sample_project())
 
@@ -100,36 +136,36 @@ class ProjectStoreTests(unittest.TestCase):
         self.assertTrue(updated["tasks"][0]["completedAt"])
         events = [entry["event"] for entry in updated["history"]]
         self.assertIn("Project status changed to active", events)
-        self.assertTrue(any("Inspect fixture" in event and "done" in event for event in events))
+        self.assertTrue(any("Confirm requirements" in event and "done" in event for event in events))
 
     def test_duplicate_resets_tasks_and_uses_unique_id(self):
         self.store.create(sample_project())
-        copy = self.store.duplicate("latch-test")
-        second_copy = self.store.duplicate("latch-test")
-        self.assertEqual(copy["id"], "latch-test-copy")
-        self.assertEqual(second_copy["id"], "latch-test-copy-2")
+        copy = self.store.duplicate("current-cycle-feature")
+        second_copy = self.store.duplicate("current-cycle-feature")
+        self.assertEqual(copy["id"], "current-cycle-feature-copy")
+        self.assertEqual(second_copy["id"], "current-cycle-feature-copy-2")
         self.assertTrue(all(task["status"] == "pending" for task in copy["tasks"]))
 
     def test_archive_filter_and_delete(self):
         self.store.create(sample_project())
-        archived = self.store.archive("latch-test")
+        archived = self.store.archive("current-cycle-feature")
         self.assertEqual(archived["status"], "archived")
         self.assertEqual(self.store.list_projects(), [])
         self.assertEqual(len(self.store.list_projects(include_archived=True)), 1)
-        self.store.delete("latch-test")
+        self.store.delete("current-cycle-feature")
         with self.assertRaises(FileNotFoundError):
-            self.store.get("latch-test")
+            self.store.get("current-cycle-feature")
 
     def test_backup_contains_projects_and_can_restore(self):
         self.store.create(sample_project())
         backup = self.store.backup()
         self.assertTrue(backup.exists())
         with zipfile.ZipFile(backup) as archive:
-            self.assertIn("projects/latch-test.json", archive.namelist())
-        self.store.delete("latch-test")
+            self.assertIn("projects/current-cycle-feature.json", archive.namelist())
+        self.store.delete("current-cycle-feature")
         self.assertEqual(self.store.restore_backup(backup.name), 1)
-        restored = self.store.get("latch-test")
-        self.assertEqual(restored["cycleTarget"], 1000)
+        restored = self.store.get("current-cycle-feature")
+        self.assertEqual(restored["requirements"], "Store current cycle on the ESP32 and expose it to the display.")
         self.assertEqual(restored["history"][0]["event"], "Project created")
 
     def test_import_preserves_existing_history(self):
@@ -169,15 +205,19 @@ class HttpSmokeTests(unittest.TestCase):
         status, content_type, body = self.request("/")
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/html")
-        self.assertIn(b"Cycle Test Project Tracker", body)
+        self.assertIn(b"Code Work Tracker", body)
 
         status, _, body = self.request("/api/projects", "POST", sample_project("api-test"))
         self.assertEqual(status, 201)
-        self.assertEqual(json.loads(body)["id"], "api-test")
+        created = json.loads(body)
+        self.assertEqual(created["id"], "api-test")
+        self.assertEqual(created["schemaVersion"], 2)
 
         status, _, body = self.request("/api/projects/api-test")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["cycleTarget"], 1000)
+        loaded = json.loads(body)
+        self.assertEqual(loaded["problem"], "The fixture does not remember the cycle it just finished.")
+        self.assertIn("relevantFiles", loaded)
 
     def test_malformed_json_returns_400(self):
         request = urllib.request.Request(

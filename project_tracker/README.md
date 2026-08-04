@@ -1,6 +1,6 @@
-# Cycle Test Project Tracker
+# Cycle Test Code Tracker
 
-This is a local project and task tracker for cycle-test work. It runs only on this computer, opens in a web browser, and saves readable JSON files in this folder. It does not connect to or change the ESP32 fixture firmware.
+This is a local tracker for **code work** needed to finish the cycle test machine. Use it to capture each problem, its requirements, and the context you want to hand to AI later. It runs only on this computer, opens in a web browser, and saves readable JSON files in this folder. It does not connect to or change the ESP32 fixture firmware.
 
 ## Start the tracker
 
@@ -18,17 +18,24 @@ Close the black command window, or click it and press `Ctrl+C`. Projects already
 ## Basic workflow
 
 1. Select **New project**.
-2. Complete the intake fields. Only the project name is required.
-3. Review the starter checklist on the **Tasks** tab. Add, remove, reorder, assign, or date tasks as needed.
-4. Select **Save project**.
-5. Update task status as work proceeds:
-   - **Pending**: not started
-   - **In progress**: currently being worked
-   - **Blocked**: cannot proceed; enter the reason
-   - **Done**: completed
-6. Use **Timeline** to see dated work and the saved activity history.
+2. Fill in the intake fields. Only the project name is required.
+   - **Problem**: what is missing or broken
+   - **Requirements**: what the finished change must do
+   - **Context for AI**: background and details an AI should know
+   - **Relevant files / paths**: code or docs to look at
+   - **Acceptance criteria**: how you will verify the change
+3. When you are ready to work the issue, select **Copy AI brief** and paste it into Cursor or another AI chat.
+4. Use the **Tasks** tab only if it helps. New projects start with four optional steps:
+   - Confirm requirements
+   - Generate code
+   - Implement
+   - Verify the change works
 
-Progress is calculated from task status. A completed task counts as 100%, an in-progress task counts as 50%, and pending or blocked tasks count as 0%.
+   Delete any you do not need, or clear them all.
+5. Select **Save project**.
+6. Update status and task progress as you go.
+
+Progress is calculated from task status when tasks exist. A completed task counts as 100%, an in-progress task counts as 50%, and pending or blocked tasks count as 0%.
 
 ## Where data is saved
 
@@ -59,7 +66,7 @@ Open a saved project and select the `•••` button:
 
 - **Duplicate project** creates a new planning copy and resets its tasks.
 - **Archive project** removes it from the normal dashboard. Select **Show archived** to view it.
-- **Delete project** permanently removes its JSON file after requiring confirmation.
+- **Delete project** asks **Yes** or **No**, then permanently removes the JSON file if you confirm.
 
 Create a backup before deleting important work.
 
@@ -67,7 +74,7 @@ Create a backup before deleting important work.
 
 ### The tracker does not open
 
-- Confirm the black command window says `Project Tracker is running`.
+- Confirm the black command window says `Code Tracker is running`.
 - Open `http://127.0.0.1:8765` manually.
 - If another program uses port 8765, close that program or run:
 
@@ -82,7 +89,6 @@ This computer had Python available when the tracker was created. If it is later 
 ### A project will not save
 
 - Make sure the project has a name.
-- Make sure every task has a title.
 - Project IDs can contain only lowercase letters, numbers, and hyphens.
 - Check the message in the lower-right corner of the browser.
 

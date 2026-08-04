@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cycle Test Project Tracker</title>
+  <title>Cycle Test Code Tracker</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="app-header">
     <div>
-      <p class="eyebrow">TEST FIXTURE WORKSPACE</p>
-      <h1>Project Tracker</h1>
+      <p class="eyebrow">CYCLE TEST MACHINE</p>
+      <h1>Code Work Tracker</h1>
     </div>
     <div class="header-actions">
       <button class="button secondary" id="backupButton" type="button">Create backup</button>
@@ -50,7 +50,7 @@
       <div id="emptyState" class="empty-state" hidden>
         <div class="empty-icon">+</div>
         <h3>No projects yet</h3>
-        <p>Create your first project to start organizing fixture setup, testing, and results.</p>
+        <p>Capture the problem, requirements, and context for each code change so you can hand it to AI when you are ready.</p>
         <button class="button primary" id="emptyNewButton" type="button">Create first project</button>
       </div>
     </section>
@@ -60,6 +60,7 @@
         <button class="text-button" id="backButton" type="button">← Back to projects</button>
         <div class="editor-actions">
           <span id="saveState" class="save-state">Not saved</span>
+          <button class="button secondary" id="copyBriefButton" type="button">Copy AI brief</button>
           <button class="button secondary" id="exportButton" type="button">Export JSON</button>
           <button class="button primary" id="saveButton" type="button">Save project</button>
           <button class="more-button" id="moreButton" type="button" aria-expanded="false" aria-label="More project actions">•••</button>
@@ -97,7 +98,7 @@
             </div>
             <div class="form-grid">
               <label class="field span-2">Project name *
-                <input name="name" required maxlength="200" placeholder="Example: Door latch endurance test">
+                <input name="name" required maxlength="200" placeholder="Example: Persist current cycle count on ESP32">
               </label>
               <label class="field">Project ID
                 <input name="id" maxlength="64" pattern="[a-z0-9][a-z0-9-]{0,63}" placeholder="Created from project name">
@@ -115,50 +116,47 @@
               <label class="field">Owner
                 <input name="owner" maxlength="100" placeholder="Person responsible">
               </label>
-              <label class="field">Fixture type
-                <input name="fixtureType" maxlength="150" placeholder="Example: Torque fixture A">
-              </label>
-              <label class="field">Measurement type
-                <select name="measurementType">
-                  <option value="">Select one</option>
-                  <option value="Force">Force</option>
-                  <option value="Torque">Torque</option>
-                  <option value="Force and torque">Force and torque</option>
-                  <option value="Other">Other</option>
-                </select>
-              </label>
-              <label class="field">Device under test
-                <input name="deviceUnderTest" maxlength="250" placeholder="Part, assembly, revision, or serial number">
-              </label>
               <label class="field">Request date
                 <input name="requestDate" type="date">
               </label>
               <label class="field">Target completion date
                 <input name="targetDate" type="date">
               </label>
-              <label class="field">Target cycles
-                <input name="cycleTarget" type="number" min="0" step="1" placeholder="0">
-              </label>
-              <label class="field span-2">Purpose / test objective
-                <textarea name="purpose" rows="3" placeholder="What question should this test answer?"></textarea>
-              </label>
             </div>
           </div>
 
           <div class="panel-card">
-            <div class="panel-heading"><div><p class="eyebrow">DEFINITION</p><h3>Success and planning</h3></div></div>
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">AI HANDOFF</p>
+                <h3>Problem and context</h3>
+              </div>
+              <p>Fill this in so you can paste a complete brief into Cursor or another AI later.</p>
+            </div>
             <div class="form-grid">
+              <label class="field span-2">Problem
+                <textarea name="problem" rows="4" placeholder="What is broken, missing, or unclear? What should change?"></textarea>
+              </label>
+              <label class="field span-2">Requirements
+                <textarea name="requirements" rows="4" placeholder="What must the finished change do? Include must-haves and nice-to-haves."></textarea>
+              </label>
+              <label class="field span-2">Context for AI
+                <textarea name="context" rows="5" placeholder="Background, current behavior, related decisions, edge cases, or anything else an AI should know before coding."></textarea>
+              </label>
+              <label class="field span-2">Relevant files / paths
+                <textarea name="relevantFiles" rows="3" placeholder="One path or file per line, e.g. TestFixtureV5.5/TestFixtureV7.ino"></textarea>
+              </label>
               <label class="field span-2">Acceptance criteria
-                <textarea name="acceptanceCriteria" rows="4" placeholder="Define what makes the test pass or fail"></textarea>
+                <textarea name="acceptanceCriteria" rows="3" placeholder="How will you know the change works? What should you be able to verify?"></textarea>
               </label>
-              <label class="field span-2">Risks, dependencies, or constraints
-                <textarea name="risks" rows="3" placeholder="Parts, resources, safety concerns, or known blockers"></textarea>
+              <label class="field span-2">Constraints
+                <textarea name="constraints" rows="2" placeholder="Limits, compatibility needs, performance, safety, or things that must not change"></textarea>
               </label>
-              <label class="field span-2">File links
-                <textarea name="fileLinks" rows="2" placeholder="One drawing, procedure, data folder, or file path per line"></textarea>
+              <label class="field span-2">Hardware / fixture notes (optional)
+                <textarea name="hardwareNotes" rows="2" placeholder="Only if this change depends on a specific fixture, sensor, or physical setup"></textarea>
               </label>
               <label class="field span-2">General notes
-                <textarea name="notes" rows="4" placeholder="Additional context and decisions"></textarea>
+                <textarea name="notes" rows="3" placeholder="Working notes, decisions, or reminders for yourself"></textarea>
               </label>
             </div>
           </div>
@@ -168,7 +166,11 @@
           <div class="task-summary" id="phaseSummary"></div>
           <div class="panel-card">
             <div class="panel-heading">
-              <div><p class="eyebrow">CHECKLIST</p><h3>Project tasks</h3></div>
+              <div>
+                <p class="eyebrow">OPTIONAL CHECKLIST</p>
+                <h3>Project tasks</h3>
+                <p class="panel-note">Use these if they help you remember where you are. Delete any you do not need.</p>
+              </div>
               <button class="button secondary" id="addTaskButton" type="button">Add task</button>
             </div>
             <div id="taskList" class="task-list"></div>
@@ -207,7 +209,7 @@
         </select>
       </label>
       <div class="task-fields">
-        <input class="task-title" data-field="title" required maxlength="200" placeholder="Task title">
+        <input class="task-title" data-field="title" maxlength="200" placeholder="Task title">
         <div class="task-meta">
           <input data-field="phase" maxlength="100" placeholder="Phase">
           <input data-field="owner" maxlength="100" placeholder="Owner">
@@ -219,6 +221,17 @@
       <button class="remove-task" type="button" data-action="remove" aria-label="Remove task">×</button>
     </article>
   </template>
+
+  <div id="confirmModal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h3 id="confirmTitle">Are you sure?</h3>
+      <p id="confirmMessage"></p>
+      <div class="modal-actions">
+        <button class="button secondary" id="confirmNo" type="button">No</button>
+        <button class="button danger" id="confirmYes" type="button">Yes</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/app.js"></script>

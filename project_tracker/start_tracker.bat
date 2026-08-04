@@ -1,7 +1,7 @@
 @echo off
-title Cycle Test Project Tracker
+title Cycle Test Code Tracker
 cd /d "%~dp0"
-echo Starting the Cycle Test Project Tracker...
+echo Starting the Cycle Test Code Tracker...
 echo.
 python server.py
 if errorlevel 1 (
