@@ -1,0 +1,2785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test Fixture — Serial Monitor</title>
+<style>
+:root{
+  --chassis:#c9cfcd;
+  --chassis-hi:#e2e6e4;
+  --chassis-lo:#9aa5a1;
+  --panel:#eceeed;
+  --ink:#161b19;
+  --ink-2:#525d59;
+  --readout:#0d1211;
+  --readout-2:#141c1a;
+  --grid:#1e2a27;
+  --amber:#f0a71c;
+  --teal:#5fd0b4;
+  --alert:#d8482c;
+  --echo:#e9e3cc;
+  --mono: ui-monospace, "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+  --ui: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --rail: 268px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:var(--ui);
+  color:var(--ink);
+  background:var(--chassis);
+  background-image:linear-gradient(180deg,var(--chassis-hi) 0%,var(--chassis) 120px);
+  font-size:13px;
+  overflow:hidden;
+}
+button,input,select,textarea{font-family:inherit;font-size:12px;color:var(--ink)}
+
+/* ---------- engraved label treatment ---------- */
+.lbl{
+  font-size:10px;
+  letter-spacing:.11em;
+  text-transform:uppercase;
+  color:var(--ink-2);
+  text-shadow:0 1px 0 rgba(255,255,255,.75);
+  white-space:nowrap;
+}
+
+/* ---------- chassis controls ---------- */
+input[type=text],input[type=number],select{
+  background:#fbfcfb;
+  border:1px solid var(--chassis-lo);
+  border-top-color:#8d9995;
+  border-radius:2px;
+  padding:4px 6px;
+  min-width:0;
+}
+input:focus,select:focus,button:focus-visible,textarea:focus{
+  outline:2px solid var(--amber);
+  outline-offset:1px;
+}
+.btn{
+  background:linear-gradient(180deg,#f4f6f5,#d9dedc);
+  border:1px solid var(--chassis-lo);
+  border-radius:2px;
+  padding:5px 9px;
+  cursor:pointer;
+  text-align:left;
+  box-shadow:0 1px 0 rgba(255,255,255,.7) inset, 0 1px 1px rgba(0,0,0,.09);
+}
+.btn:hover{background:linear-gradient(180deg,#fff,#e4e9e7)}
+.btn:active{background:linear-gradient(180deg,#cfd5d3,#e6ebe9);box-shadow:0 1px 2px rgba(0,0,0,.18) inset}
+.btn:disabled{opacity:.42;cursor:not-allowed}
+.btn.primary{
+  background:linear-gradient(180deg,#3d4a46,#242e2b);
+  color:#f2f5f4;border-color:#1b2320;
+  text-align:center;font-weight:600;letter-spacing:.04em;
+}
+.btn.primary:hover{background:linear-gradient(180deg,#4b5a55,#2c3733)}
+.btn.on{background:linear-gradient(180deg,#f6c862,#e0940f);border-color:#b5760a}
+.btn.mono{font-family:var(--mono);font-size:11.5px}
+.btn.tiny{padding:3px 6px;font-size:11px}
+
+/* ---------- layout ---------- */
+.app{display:flex;flex-direction:column;height:100%}
+
+/* header plate */
+.plate{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:8px 14px;
+  border-bottom:1px solid var(--chassis-lo);
+  box-shadow:0 1px 0 rgba(255,255,255,.6);
+}
+.mark{display:flex;flex-direction:column;line-height:1.05;padding-right:12px;border-right:1px solid var(--chassis-lo)}
+.mark b{font-size:15px;letter-spacing:.02em}
+.mark span{font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-2)}
+.field{display:flex;align-items:center;gap:5px}
+
+/* LEDs — signature element */
+.leds{display:flex;gap:12px;padding:5px 11px;background:#20292661;border:1px solid var(--chassis-lo);border-radius:3px;box-shadow:0 1px 2px rgba(0,0,0,.12) inset}
+.led{display:flex;flex-direction:column;align-items:center;gap:3px}
+.led i{
+  width:9px;height:9px;border-radius:50%;
+  background:#5c6663;box-shadow:0 0 0 1px #00000038 inset;
+  transition:background .12s,box-shadow .12s;
+}
+.led.on i{background:var(--amber);box-shadow:0 0 7px var(--amber),0 0 0 1px #00000038 inset}
+.led.on.link i{background:#57d07f;box-shadow:0 0 7px #57d07f}
+.led.on.log i{background:var(--teal);box-shadow:0 0 7px var(--teal)}
+.led.err i{background:var(--alert);box-shadow:0 0 8px var(--alert)}
+.led b{font-size:8.5px;letter-spacing:.12em;color:var(--ink-2);font-weight:600}
+
+/* readout row */
+.readout-strip{
+  display:flex;gap:1px;background:var(--chassis-lo);
+  border-top:1px solid var(--chassis-lo);border-bottom:1px solid var(--chassis-lo);
+}
+.rd{flex:1;background:var(--readout);padding:5px 10px;min-width:0}
+.rd .lbl{color:#6f8079;text-shadow:none}
+.rd b{
+  display:block;font-family:var(--mono);font-size:19px;font-weight:500;
+  color:var(--amber);letter-spacing:.01em;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.rd.sec b{color:var(--teal)}
+.rd.dim b{color:#8fa39c;font-size:15px;padding-top:3px}
+
+/* main */
+main{flex:1;display:flex;min-height:0}
+.stage{flex:1;display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--chassis-lo)}
+
+.toolbar{display:flex;align-items:center;gap:7px;padding:6px 10px;flex-wrap:wrap}
+.toolbar .grow{flex:1;min-width:90px}
+.sep{width:1px;align-self:stretch;background:var(--chassis-lo);margin:0 2px}
+
+/* monitor */
+#monitor{
+  flex:1;margin:0 10px;padding:8px 10px;
+  background:var(--readout);
+  border:1px solid #06090800;
+  border-radius:3px 3px 0 0;
+  box-shadow:0 2px 6px rgba(0,0,0,.28) inset;
+  overflow:auto;overflow-anchor:none;
+  font-family:var(--mono);font-size:12px;line-height:1.42;
+  color:#c3d2cd;
+  white-space:pre;
+  scrollbar-color:#3a4a45 var(--readout);
+}
+#monitor .ln{display:block}
+#monitor .ts{color:#5d6f69}
+#monitor .k-data{color:#c3d2cd}
+#monitor .k-cal{color:var(--teal)}
+#monitor .k-buf{color:#4c9d87}
+#monitor .k-tag{color:var(--amber)}
+#monitor .k-err{color:var(--alert);font-weight:600}
+#monitor .k-echo{color:var(--echo);font-weight:600}
+#monitor .k-sys{color:#7d8f89;font-style:italic}
+#monitor mark{background:var(--amber);color:#0d1211;border-radius:1px}
+
+/* chart */
+#chartWrap{margin:0 10px;background:var(--readout-2);border-top:1px solid var(--grid);position:relative;height:180px}
+#chartWrap.hidden{display:none}
+#chart{display:block;width:100%;height:100%}
+.chart-legend{position:absolute;top:5px;right:9px;display:flex;gap:11px;font-family:var(--mono);font-size:10.5px;pointer-events:none}
+.chart-legend span:first-child{color:var(--amber)}
+.chart-legend span:last-child{color:var(--teal)}
+
+/* command bar */
+.cmdbar{display:flex;gap:7px;align-items:center;padding:8px 10px 6px}
+#cmd{flex:1;font-family:var(--mono);font-size:13px;padding:7px 9px;background:#fbfcfb}
+.statusbar{
+  display:flex;gap:10px;align-items:center;
+  padding:4px 12px;border-top:1px solid var(--chassis-lo);
+  background:#00000008;font-family:var(--mono);font-size:11px;color:var(--ink-2);
+}
+.statusbar .spacer{flex:1}
+.statusbar.err{color:var(--alert);font-weight:600}
+
+/* right rail */
+.rail{width:var(--rail);display:flex;flex-direction:column;min-height:0;background:#00000006}
+.rail-tabs{display:flex;border-bottom:1px solid var(--chassis-lo)}
+.rail-tabs button{
+  flex:1;background:none;border:0;border-bottom:2px solid transparent;
+  padding:8px 2px;cursor:pointer;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2);
+}
+.rail-tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--amber);font-weight:700}
+.rail-body{flex:1;overflow:auto;padding:9px}
+.rail-panel{display:none}
+.rail-panel.active{display:block}
+.grp{border:1px solid var(--chassis-lo);border-radius:3px;margin-bottom:9px;background:#ffffff5c}
+.grp>h3{
+  margin:0;padding:5px 8px;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-2);border-bottom:1px solid var(--chassis-lo);font-weight:700;
+}
+.grp>div{padding:6px;display:flex;flex-direction:column;gap:4px}
+.row{display:flex;gap:5px;align-items:center}
+.row input{flex:1}
+.stack{display:flex;flex-direction:column;gap:5px}
+.hint{font-size:11px;color:var(--ink-2);line-height:1.45}
+.hint code{font-family:var(--mono);background:#0000000f;padding:0 3px;border-radius:2px}
+textarea{
+  width:100%;font-family:var(--mono);font-size:11.5px;
+  border:1px solid var(--chassis-lo);border-radius:2px;padding:6px;background:#fbfcfb;resize:vertical;
+}
+.pathline{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);word-break:break-all;line-height:1.35}
+
+
+/* view tabs on the stage */
+.view-tabs{display:flex;gap:0;padding:0 10px;border-bottom:1px solid var(--chassis-lo)}
+.view-tabs button{
+  background:none;border:0;border-bottom:2px solid transparent;
+  padding:9px 16px;cursor:pointer;font-size:10.5px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--ink-2);font-weight:600;
+}
+.view-tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--amber)}
+.view{display:none;flex:1;min-height:0;flex-direction:column}
+.view.active{display:flex}
+
+/* shared panel bits for cal + runs views */
+.panel{padding:9px 10px;display:flex;flex-wrap:wrap;gap:9px;align-items:flex-end}
+.ctl{display:flex;flex-direction:column;gap:3px}
+.ctl input,.ctl select{height:26px}
+.ctl.w-s input,.ctl.w-s select{width:88px}
+.ctl.w-m input,.ctl.w-m select{width:140px}
+.ctl.w-l{flex:1;min-width:180px}
+.ctl.w-l input{width:100%}
+.btnrow{display:flex;gap:5px;align-items:center}
+.btnrow .btn{text-align:center}
+.chk{display:flex;align-items:center;gap:5px;height:26px}
+.note{
+  margin:0 10px 8px;padding:7px 10px;border-left:3px solid var(--amber);
+  background:#f0a71c1f;font-size:11.5px;line-height:1.5;border-radius:0 2px 2px 0;
+}
+.note.warn{border-left-color:var(--alert);background:#d8482c17}
+.note.hidden{display:none}
+.split{display:flex;flex:1;min-height:0;gap:0}
+.plotbox{flex:1;min-width:0;margin:0 0 0 10px;background:var(--readout);border-radius:3px;position:relative}
+.plotbox canvas{display:block;width:100%;height:100%}
+.sidebox{width:300px;display:flex;flex-direction:column;min-height:0;padding:0 10px}
+.tablewrap{flex:1;overflow:auto;border:1px solid var(--chassis-lo);border-radius:2px;background:#fff}
+table.pts{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+table.pts th{
+  position:sticky;top:0;background:var(--chassis-hi);text-align:right;padding:5px 6px;
+  font-family:var(--ui);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;
+  border-bottom:1px solid var(--chassis-lo);color:var(--ink-2);
+}
+table.pts td{padding:3px 6px;text-align:right;border-bottom:1px solid #0000000e;font-variant-numeric:tabular-nums}
+table.pts td:last-child{text-align:center;width:52px}
+table.pts tr:hover{background:#f0a71c1a}
+table.pts .send{padding:1px 7px;font-size:10px}
+pre.seqview{
+  margin:0;flex:1;overflow:auto;background:var(--readout);color:#c3d2cd;
+  font-family:var(--mono);font-size:11px;line-height:1.45;padding:8px 10px;border-radius:3px;
+}
+.metrics{display:flex;gap:16px;flex-wrap:wrap;padding:6px 10px;font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.metrics b{color:var(--ink);font-weight:600}
+.pill{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 8px;border-radius:10px;font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;font-weight:700;background:#00000012;color:var(--ink-2);
+}
+.pill.run{background:#57d07f33;color:#1a6b3c}
+.pill.pause{background:#f0a71c33;color:#8a5a00}
+.pill.done{background:#5fd0b433;color:#1a5c4e}
+.pill.err{background:#d8482c22;color:var(--alert)}
+.subhead{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-2);font-weight:700;padding:2px 0}
+.toggle.on{background:linear-gradient(180deg,#f6c862,#e0940f);border-color:#b5760a}
+@media (max-width:1200px){ .sidebox{width:240px} }
+
+@media (max-width:900px){
+  body{overflow:auto}
+  main{flex-direction:column}
+  .rail{width:auto;border-top:1px solid var(--chassis-lo)}
+  .stage{border-right:0}
+  #monitor{min-height:320px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= header plate ================= -->
+  <header class="plate">
+    <div class="mark">
+      <b>Test Fixture</b>
+      <span>Serial Monitor</span>
+    </div>
+
+    <div class="leds">
+      <div class="led link" id="ledLink"><i></i><b>LINK</b></div>
+      <div class="led" id="ledRx"><i></i><b>RX</b></div>
+      <div class="led" id="ledRun"><i></i><b>RUN</b></div>
+      <div class="led log" id="ledLog"><i></i><b>LOG</b></div>
+    </div>
+    <span class="pill" id="pillMode">mode —</span>
+    <span class="pill" id="pillState">idle</span>
+
+    <div class="field">
+      <span class="lbl">Baud</span>
+      <input type="number" id="baud" value="115200" style="width:74px">
+    </div>
+    <div class="field">
+      <span class="lbl">Line ending</span>
+      <select id="eol">
+        <option value="lf" selected>LF</option>
+        <option value="crlf">CR+LF</option>
+        <option value="cr">CR</option>
+        <option value="none">None</option>
+      </select>
+    </div>
+    <button class="btn primary" id="btnConnect" style="min-width:104px">Connect</button>
+
+    <div class="field">
+      <span class="lbl">CSV fields</span>
+      <select id="fieldOrder" title="Order of the 4 comma-separated numbers the firmware prints">
+        <option value="v6" selected>t, cyc, pos, lc  (V6)</option>
+        <option value="legacy">cyc, t, pos, lc  (legacy)</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- ================= live readouts ================= -->
+  <div class="readout-strip">
+    <div class="rd"><span class="lbl">Force</span><b id="rdForce">—</b></div>
+    <div class="rd sec"><span class="lbl">Position (steps)</span><b id="rdPos">—</b></div>
+    <div class="rd dim"><span class="lbl">Cycle done / target</span><b id="rdCycle">—</b></div>
+    <div class="rd dim"><span class="lbl">Dwell</span><b id="rdDwell">—</b></div>
+    <div class="rd dim"><span class="lbl">Force min / max</span><b id="rdRange">—</b></div>
+    <div class="rd dim"><span class="lbl">Samples/s</span><b id="rdRate">0.0</b></div>
+    <div class="rd dim"><span class="lbl">Device time</span><b id="rdTime">—</b></div>
+  </div>
+
+  <main>
+    <!-- ================= stage ================= -->
+    <section class="stage">
+      <div class="view-tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-view="monitor">Monitor</button>
+        <button role="tab" aria-selected="false" data-view="cal">Calibration</button>
+        <button role="tab" aria-selected="false" data-view="runs">Runs</button>
+      </div>
+
+      <div class="view active" id="view-monitor">
+      <div class="toolbar">
+        <input type="text" id="filter" class="grow" placeholder="Filter lines (plain text or /regex/)">
+        <button class="btn tiny" id="btnScroll" aria-pressed="true">Auto-scroll: on</button>
+        <button class="btn tiny" id="btnTs" aria-pressed="true">Timestamps: on</button>
+        <button class="btn tiny" id="btnChart" aria-pressed="true">Chart: on</button>
+        <select id="chartMode" style="width:120px">
+          <option value="time">Force vs time</option>
+          <option value="xy">Force vs position</option>
+        </select>
+        <div class="sep"></div>
+        <button class="btn tiny" id="btnClear">Clear screen</button>
+        <button class="btn tiny" id="btnCopy">Copy</button>
+      </div>
+
+      <div id="monitor" tabindex="0" role="log" aria-live="polite"></div>
+
+      <div id="chartWrap">
+        <canvas id="chart"></canvas>
+        <div class="chart-legend"><span>force</span><span>position</span></div>
+      </div>
+      </div><!-- /view-monitor -->
+
+      <!-- ============ CALIBRATION (fixture bring-up + cal sweep) ============ -->
+      <div class="view" id="view-cal">
+        <div class="panel">
+          <div class="ctl" style="min-width:220px">
+            <span class="lbl">Fixture mode</span>
+            <div class="btnrow">
+              <button class="btn tiny mono" data-cmd="mode fixture">mode fixture</button>
+              <button class="btn tiny mono" data-cmd="status">status</button>
+            </div>
+          </div>
+          <div class="ctl" style="min-width:280px">
+            <span class="lbl">Zero / home</span>
+            <div class="btnrow">
+              <button class="btn tiny" id="calTare">Tare (shift zero here)</button>
+              <button class="btn tiny mono" data-cmd="setpos home">setpos home</button>
+            </div>
+          </div>
+          <div class="ctl w-s"><span class="lbl">Known weight</span><input type="number" id="calKnownWeight" value="9.75" step="0.01"></div>
+          <div class="ctl" style="min-width:260px">
+            <span class="lbl">Point cal</span>
+            <div class="btnrow">
+              <button class="btn tiny" id="calAddPoint">cal weight</button>
+              <button class="btn tiny mono" data-cmd="read lc">read lc</button>
+              <button class="btn tiny mono" data-cmd="read lc raw">read lc raw</button>
+            </div>
+          </div>
+          <div class="ctl" style="min-width:280px">
+            <span class="lbl">Table</span>
+            <div class="btnrow">
+              <button class="btn tiny mono" data-cmd="cal clear">cal clear</button>
+              <button class="btn tiny mono" data-cmd="cal preset">cal preset</button>
+              <button class="btn tiny" data-cmd="cal preset save">Save as preset</button>
+              <button class="btn tiny mono" data-cmd="save">save</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" style="padding-top:0">
+          <div class="ctl" style="min-width:360px">
+            <span class="lbl">Sweep sequence (hat preset)</span>
+            <div class="btnrow">
+              <button class="btn tiny" id="calLoadSweepSeq">Load sweep sequence</button>
+              <button class="btn tiny" id="calStart1">Start 1 cycle</button>
+              <button class="btn tiny mono" data-cmd="lc raw on">lc raw on</button>
+              <button class="btn tiny mono" data-cmd="lc raw off">lc raw off</button>
+            </div>
+          </div>
+          <div class="hint" style="align-self:center;max-width:420px">
+            Calibration commands need <code>mode fixture</code>. Loading the sweep sequence switches to setup, clears the current sequence, and writes a slow raw-ADC pass.
+          </div>
+        </div>
+
+        <div class="subhead" style="padding:4px 10px 0">Cal sweep — capture [CAL] lines, fit a sine, upload points</div>
+        <div class="panel">
+          <div class="ctl w-s"><span class="lbl">Max torque</span><input type="number" id="calMaxTorque" value="25.0" step="0.01"></div>
+          <div class="ctl w-s"><span class="lbl">Steps / rev</span><input type="number" id="calSpr" value="1600" step="1"></div>
+          <div class="chk"><input type="checkbox" id="calRefine" checked><label for="calRefine" class="lbl">Refine &#969;</label></div>
+          <div class="chk"><input type="checkbox" id="calRobust" checked><label for="calRobust" class="lbl">Reject outliers</label></div>
+          <div class="chk"><input type="checkbox" id="calPrefilter"><label for="calPrefilter" class="lbl">Extra PC-side ADC filter</label></div>
+          <div class="ctl w-m"><span class="lbl">Points from</span>
+            <select id="calSource">
+              <option value="measured" selected>Measured samples</option>
+              <option value="fitted">Fitted curve</option>
+            </select>
+          </div>
+          <div class="ctl w-m"><span class="lbl">Spacing</span>
+            <select id="calSpacing">
+              <option value="value" selected>Even across raw range</option>
+              <option value="rank">Even by rank (old tool)</option>
+            </select>
+          </div>
+          <div class="ctl w-s"><span class="lbl">Points</span><input type="number" id="calN" value="10" min="2" max="30" step="1"></div>
+        </div>
+
+        <div class="panel" style="padding-top:0">
+          <div class="btnrow">
+            <button class="btn" id="calStart">Start capture</button>
+            <button class="btn" id="calStop" disabled>Stop capture</button>
+            <button class="btn" id="calProcess" disabled>Process sweep</button>
+            <button class="btn" id="calClear">Clear</button>
+          </div>
+        </div>
+
+        <div class="metrics">
+          <span>Samples <b id="calCount">0</b></span>
+          <span>Dropped <b id="calDropped">0</b></span>
+          <span>Amplitude <b id="calA">—</b></span>
+          <span>Phase <b id="calPhi">—</b></span>
+          <span>Offset <b id="calC">—</b></span>
+          <span>Fitted steps/rev <b id="calSprFit">—</b></span>
+          <span>RMSE <b id="calRmse">—</b></span>
+          <span>Rejected <b id="calRej">—</b></span>
+        </div>
+
+        <div class="note warn hidden" id="calCollinear">
+          Points taken from the fitted curve lie exactly on one sine. Once converted to torque they are
+          perfectly collinear, so a 10-point table behaves identically to a 2-point calibration. Use
+          measured samples if you want the table to capture real sensor nonlinearity.
+        </div>
+
+        <div class="split">
+          <div class="plotbox"><canvas id="calPlot"></canvas></div>
+          <div class="sidebox">
+            <span class="lbl" style="padding:0 0 4px">Calibration points</span>
+            <div class="tablewrap">
+              <table class="pts" id="calTable">
+                <thead><tr><th>#</th><th>Raw ADC</th><th>Torque</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="stack" style="padding:7px 0 9px">
+              <button class="btn tiny" id="calSendAll" disabled style="text-align:center">Send all points to fixture</button>
+              <div class="row" style="gap:5px">
+                <button class="btn tiny" id="calCopyBlock" style="flex:1;text-align:center">Copy upload block</button>
+                <button class="btn tiny" id="calCopyArrays" style="flex:1;text-align:center">Copy firmware arrays</button>
+              </div>
+              <button class="btn tiny" id="calDownload" style="text-align:center">Download sweep CSV</button>
+            </div>
+          </div>
+        </div>
+      </div><!-- /view-cal -->
+
+      <!-- ============ RUNS ============ -->
+      <div class="view" id="view-runs">
+        <div class="panel">
+          <div class="ctl w-s"><span class="lbl">Target cycles</span><input type="number" id="runCycles" value="1" min="1" step="1" title="Absolute target: run until completed cycles reach this number"></div>
+          <div class="ctl w-m"><span class="lbl">LC logging</span>
+            <select id="runLcProfile">
+              <option value="all" selected>All cycles</option>
+              <option value="every">Every k-th cycle</option>
+              <option value="list">Listed cycles only</option>
+            </select>
+          </div>
+          <div class="ctl w-s" id="runLcEveryWrap" style="display:none"><span class="lbl">Every k</span><input type="number" id="runLcEvery" value="2" min="1" step="1"></div>
+          <div class="ctl w-m" id="runLcListWrap" style="display:none"><span class="lbl">Cycle list</span><input type="text" id="runLcList" placeholder="1,5,10"></div>
+          <div class="ctl w-l"><span class="lbl">Run notes</span><input type="text" id="runNotes" placeholder="Part number, operator, conditions…"></div>
+        </div>
+
+        <div class="panel" style="padding-top:0">
+          <div class="chk"><input type="checkbox" id="runResetFirst"><label for="runResetFirst" class="lbl">Reset cycles before start</label></div>
+          <div class="btnrow">
+            <button class="btn" id="runFetchSeq">Fetch sequence</button>
+            <button class="btn" id="runStart" disabled>Start run</button>
+            <button class="btn" id="runPause">Pause</button>
+            <button class="btn" id="runResume">Resume</button>
+            <button class="btn" id="runStop" disabled>Stop capture</button>
+            <button class="btn" id="runResetCyc" title="Clear completed count to 0. Target is kept and saved on the fixture.">Reset cycles</button>
+            <button class="btn" id="runSave" disabled>Save run</button>
+          </div>
+        </div>
+
+        <div class="metrics">
+          <span>Run <b id="runId">—</b></span>
+          <span>Samples <b id="runSamples">0</b></span>
+          <span>Cycles seen <b id="runCyclesSeen">—</b></span>
+          <span>Fixture cycles <b id="runFixCyc">—</b></span>
+          <span>Duration <b id="runDur">—</b></span>
+          <span>Sequence steps <b id="runSeqCount">—</b></span>
+          <span>State <b id="runStateLbl">—</b></span>
+        </div>
+
+        <div class="note hidden" id="runNote"></div>
+
+        <div class="split">
+          <div class="plotbox"><canvas id="runPlot"></canvas></div>
+          <div class="sidebox">
+            <span class="lbl" style="padding:0 0 4px">Sequence on the fixture</span>
+            <pre class="seqview" id="runSeqView">Press Fetch sequence.</pre>
+            <div class="stack" style="padding:7px 0 9px">
+              <button class="btn tiny" id="runPickDir" style="text-align:center">Choose run folder…</button>
+              <div class="pathline" id="runDirPath">No folder chosen — Save run will download the workbook.</div>
+              <div class="hint"><code>start N</code> is an absolute target: the fixture runs until completed cycles reach N (saved in NVS). Use Reset cycles to start from 0.</div>
+            </div>
+          </div>
+        </div>
+      </div><!-- /view-runs -->
+
+      <div class="cmdbar">
+        <input type="text" id="cmd" placeholder="Type a command and press Enter  (↑ / ↓ for history)" autocomplete="off" spellcheck="false" disabled>
+        <button class="btn primary" id="btnSend" disabled style="min-width:72px">Send</button>
+      </div>
+
+      <div class="statusbar" id="status">
+        <span id="statusText">Connect a fixture to start.</span>
+        <span class="spacer"></span>
+        <span id="statLines">0 lines</span>
+        <span id="statFile"></span>
+      </div>
+    </section>
+
+    <!-- ================= right rail ================= -->
+    <aside class="rail">
+      <div class="rail-tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="cmds">Commands</button>
+        <button role="tab" aria-selected="false" data-tab="log">Logging</button>
+        <button role="tab" aria-selected="false" data-tab="seq">Sequence</button>
+        <button role="tab" aria-selected="false" data-tab="setup">Setup</button>
+      </div>
+
+      <div class="rail-body">
+        <!-- ---- commands ---- -->
+        <div class="rail-panel active" id="tab-cmds">
+          <div class="grp">
+            <h3>Run</h3>
+            <div>
+              <div class="row">
+                <input type="number" id="cycles" value="1" min="1" step="1">
+                <button class="btn tiny" data-tpl="start {cycles}">start N</button>
+              </div>
+              <div class="row">
+                <input type="number" id="lcEvery" value="2" min="1" step="1">
+                <button class="btn tiny" data-tpl="start {cycles} LC every {lcEvery}">start N, LC every k</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny" data-cmd="pause" style="flex:1;text-align:center">pause</button>
+                <button class="btn tiny" data-cmd="resume" style="flex:1;text-align:center">resume</button>
+                <button class="btn tiny" data-cmd="stop" style="flex:1;text-align:center">stop</button>
+              </div>
+              <div class="row">
+                <input type="text" id="lcCyclesList" value="1,5,10" placeholder="1,5,10">
+                <button class="btn tiny" data-tpl="start {cycles} LC cycles {lcCyclesList}">LC cycles</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="cycles" style="flex:1;text-align:center">cycles</button>
+                <button class="btn tiny" data-cmd="cycles reset" style="flex:1;text-align:center">cycles reset</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Mode</h3>
+            <div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny" data-cmd="mode setup" style="flex:1;text-align:center">setup</button>
+                <button class="btn tiny" data-cmd="mode fixture" style="flex:1;text-align:center">fixture</button>
+                <button class="btn tiny" data-cmd="mode adj" style="flex:1;text-align:center">adj</button>
+                <button class="btn tiny" data-cmd="mode live" style="flex:1;text-align:center">live</button>
+              </div>
+              <button class="btn tiny mono" data-cmd="status">status</button>
+              <button class="btn tiny mono" data-cmd="help">help</button>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Load cell</h3>
+            <div>
+              <button class="btn tiny mono" data-cmd="tare">tare / shift zero</button>
+              <button class="btn tiny mono" data-cmd="read lc">read lc</button>
+              <button class="btn tiny mono" data-cmd="read lc raw">read lc raw</button>
+              <button class="btn tiny mono" data-cmd="flush lc">flush lc</button>
+              <div class="row">
+                <input type="number" id="knownWeight" value="9.75" step="0.01">
+                <button class="btn tiny" data-tpl="cal weight {knownWeight}">cal weight</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="lc raw on" style="flex:1;text-align:center">raw on</button>
+                <button class="btn tiny mono" data-cmd="lc raw off" style="flex:1;text-align:center">raw off</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="cal preset" style="flex:1;text-align:center">cal preset</button>
+                <button class="btn tiny" data-cmd="cal preset save" style="flex:1;text-align:center">save as preset</button>
+                <button class="btn tiny mono" data-cmd="cal clear" style="flex:1;text-align:center">cal clear</button>
+              </div>
+              <div class="hint">Tare / cal / raw need <code>mode fixture</code>. Full sweep tools are on the Calibration tab.</div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Motion</h3>
+            <div>
+              <div class="row">
+                <input type="number" id="jogSteps" value="100" step="1">
+                <button class="btn tiny" data-tpl="jog {jogSteps}">jog</button>
+              </div>
+              <div class="row">
+                <input type="text" id="gotoPos" value="0" placeholder="steps or XA">
+                <button class="btn tiny" data-tpl="goto {gotoPos}">goto</button>
+              </div>
+              <div class="row">
+                <input type="number" id="seekForce" value="10.0" step="0.1">
+                <button class="btn tiny" data-tpl="seek force {seekForce}">seek force</button>
+              </div>
+              <button class="btn tiny mono" data-cmd="seek stop">seek stop</button>
+              <button class="btn tiny mono" data-cmd="get pos">get pos</button>
+              <button class="btn tiny mono" data-cmd="listpos">listpos</button>
+              <button class="btn tiny mono" data-cmd="setpos home">setpos home</button>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny" data-cmd="setpos XA" style="flex:1;text-align:center">setpos XA</button>
+                <button class="btn tiny" data-cmd="setpos XB" style="flex:1;text-align:center">setpos XB</button>
+                <button class="btn tiny" data-cmd="setpos XC" style="flex:1;text-align:center">setpos XC</button>
+                <button class="btn tiny" data-cmd="setpos XD" style="flex:1;text-align:center">setpos XD</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Servo &amp; break beam</h3>
+            <div>
+              <div class="row">
+                <input type="number" id="servoDeg" value="90" min="0" max="180" step="1">
+                <button class="btn tiny" data-tpl="servo {servoDeg}">servo deg</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="servo goto SA" style="flex:1;text-align:center">SA</button>
+                <button class="btn tiny mono" data-cmd="servo goto SB" style="flex:1;text-align:center">SB</button>
+                <button class="btn tiny mono" data-cmd="servo goto SC" style="flex:1;text-align:center">SC</button>
+                <button class="btn tiny mono" data-cmd="servo goto SD" style="flex:1;text-align:center">SD</button>
+              </div>
+              <button class="btn tiny mono" data-cmd="servo list">servo list</button>
+              <button class="btn tiny mono" data-cmd="servo off">servo off</button>
+              <button class="btn tiny mono" data-cmd="read bb">read bb</button>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Sample rate (mode setup)</h3>
+            <div>
+              <button class="btn tiny mono" data-cmd="set lc_motion_samples 1">set lc_motion_samples 1</button>
+              <button class="btn tiny mono" data-cmd="set lc_sampler_ms 13">set lc_sampler_ms 13</button>
+              <button class="btn tiny mono" data-cmd="set lc_sampler_ms 0">set lc_sampler_ms 0</button>
+              <button class="btn tiny mono" data-cmd="set lc_ring 1">set lc_ring 1</button>
+              <button class="btn tiny mono" data-cmd="set lc_ring 0">set lc_ring 0</button>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Storage</h3>
+            <div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="save" style="flex:1;text-align:center">save</button>
+                <button class="btn tiny mono" data-cmd="load" style="flex:1;text-align:center">load</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="save seq" style="flex:1;text-align:center">save seq</button>
+                <button class="btn tiny mono" data-cmd="load seq" style="flex:1;text-align:center">load seq</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="list seq" style="flex:1;text-align:center">list seq</button>
+                <button class="btn tiny mono" data-cmd="clear seq" style="flex:1;text-align:center">clear seq</button>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny" data-cmd="wipe seq" style="flex:1;text-align:center">wipe seq</button>
+                <button class="btn tiny" id="btnWipeAll" style="flex:1;text-align:center">wipe all</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Your presets</h3>
+            <div id="presetList"></div>
+            <div style="padding:0 6px 6px">
+              <div class="row">
+                <input type="text" id="presetNew" placeholder="e.g. set speed 800">
+                <button class="btn tiny" id="btnAddPreset">Add</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---- logging ---- -->
+        <div class="rail-panel" id="tab-log">
+          <div class="grp">
+            <h3>Live CSV to disk</h3>
+            <div>
+              <div class="row"><span class="lbl" style="width:64px">Test name</span><input type="text" id="testName" value="run"></div>
+              <div class="row"><span class="lbl" style="width:64px">Max MB</span><input type="number" id="maxMb" value="10" min="1" step="1"></div>
+              <div class="row"><span class="lbl" style="width:64px">Flush</span><input type="number" id="flushSec" value="2" min="1" step="1" title="Seconds between commits to disk"></div>
+              <button class="btn tiny" id="btnPickDir" style="text-align:center">Choose log folder…</button>
+              <button class="btn tiny" id="btnLogToggle" style="text-align:center" disabled>Start logging</button>
+              <div class="pathline" id="logPath">No folder selected. Recording to memory only — use Download CSV below.</div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Buffer</h3>
+            <div>
+              <button class="btn tiny" id="btnDownload" style="text-align:center">Download CSV of this session</button>
+              <button class="btn tiny" id="btnDownloadTxt" style="text-align:center">Download raw text</button>
+              <button class="btn tiny" id="btnResetStats" style="text-align:center">Reset min/max and counters</button>
+              <div class="hint" id="bufInfo">0 rows held in memory.</div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Columns written</h3>
+            <div>
+              <div class="hint">
+                <code>pc_time_iso, cycle, device_timestamp, position, force, raw_line</code><br><br>
+                Same header as the Python logger, so existing Power Query dashboards and analysis
+                scripts keep working. Point Power Query at the newest part file and refresh on a timer.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---- sequence ---- -->
+        <div class="rail-panel" id="tab-seq">
+          <div class="grp">
+            <h3>Paste a sequence</h3>
+            <div>
+              <div class="hint">Sends <code>upload seq</code>, then one line at a time, then <code>END</code>. Firmware auto-saves.</div>
+              <textarea id="seqText" rows="12" spellcheck="false" placeholder="FOR 5&#10;  G0 XA F800 LC RT20&#10;  G0 X0&#10;ENDFOR"></textarea>
+              <div class="row">
+                <span class="lbl" style="width:76px">Gap (ms)</span>
+                <input type="number" id="seqGap" value="30" min="0" step="5">
+              </div>
+              <button class="btn tiny" id="btnSendSeq" style="text-align:center">Upload sequence</button>
+              <div class="hint" id="seqStatus"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---- setup ---- -->
+        <div class="rail-panel" id="tab-setup">
+          <div class="grp">
+            <h3>Motion defaults (mode setup)</h3>
+            <div>
+              <div class="row"><span class="lbl" style="width:72px">Speed</span><input type="number" id="setSpeed" value="800" step="1"><button class="btn tiny" data-tpl="set speed {setSpeed}">set</button></div>
+              <div class="row"><span class="lbl" style="width:72px">Accel</span><input type="number" id="setAccel" value="4000" step="1"><button class="btn tiny" data-tpl="set accel {setAccel}">set</button></div>
+              <div class="row"><span class="lbl" style="width:72px">Steps/rev</span><input type="number" id="setSpr" value="400" step="1"><button class="btn tiny" data-tpl="set steps_rev {setSpr}">set</button></div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Load-cell limits</h3>
+            <div>
+              <div class="row"><span class="lbl" style="width:72px">Upper</span><input type="number" id="setLcUpper" value="20" step="0.01"><button class="btn tiny" data-tpl="set lc_upper {setLcUpper}">set</button></div>
+              <div class="row"><span class="lbl" style="width:72px">Lower</span><input type="number" id="setLcLower" value="-20" step="0.01"><button class="btn tiny" data-tpl="set lc_lower {setLcLower}">set</button></div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny" data-cmd="set lc_limits 1" style="flex:1;text-align:center">limits on</button>
+                <button class="btn tiny" data-cmd="set lc_limits 0" style="flex:1;text-align:center">limits off</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Seek / force direction</h3>
+            <div>
+              <div class="hint">+1 if moving in +steps increases measured force. Matches the hat “arrow direction” request via <code>set seek_dir</code>.</div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny" data-cmd="set seek_dir 1" style="flex:1;text-align:center">seek_dir +1</button>
+                <button class="btn tiny" data-cmd="set seek_dir -1" style="flex:1;text-align:center">seek_dir −1</button>
+              </div>
+              <div class="row"><span class="lbl" style="width:72px">Kp</span><input type="number" id="setSeekKp" value="40" step="0.1"><button class="btn tiny" data-tpl="set seek_kp {setSeekKp}">set</button></div>
+              <div class="row"><span class="lbl" style="width:72px">Vmax</span><input type="number" id="setSeekVmax" value="400" step="1"><button class="btn tiny" data-tpl="set seek_vmax {setSeekVmax}">set</button></div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Display polarity</h3>
+            <div>
+              <div class="hint">Inverts charts and readouts only — logged CSV stays as the fixture sent it. Jog invert flips the sign of <code>jog</code> commands.</div>
+              <button class="btn tiny" id="btnInvForce" aria-pressed="false" style="text-align:center">Force polarity: normal</button>
+              <button class="btn tiny" id="btnInvPos" aria-pressed="false" style="text-align:center">Position polarity: normal</button>
+              <button class="btn tiny" id="btnInvJog" aria-pressed="false" style="text-align:center">Jog polarity: normal</button>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h3>Break-beam</h3>
+            <div>
+              <div class="row" style="gap:4px">
+                <button class="btn tiny mono" data-cmd="read bb" style="flex:1;text-align:center">read bb</button>
+                <button class="btn tiny mono" data-cmd="read bb1" style="flex:1;text-align:center">bb1</button>
+                <button class="btn tiny mono" data-cmd="read bb2" style="flex:1;text-align:center">bb2</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   Test Fixture serial monitor — single file, no dependencies.
+   Talks to the ESP32 over the Web Serial API (Chrome / Edge).
+   Writes CSV straight to a folder via the File System Access API.
+   ============================================================ */
+
+const $ = id => document.getElementById(id);
+
+const MAX_SCREEN_LINES = 4000;   // lines kept in the DOM
+const MAX_ROWS         = 200000; // rows kept in memory for download
+const MAX_PLOT_POINTS  = 3000;
+
+/* ---------- persisted settings (degrades to memory-only) ---------- */
+const store = (() => {
+  let ok = true;
+  try { localStorage.setItem("__t", "1"); localStorage.removeItem("__t"); }
+  catch (e) { ok = false; }
+  const mem = {};
+  return {
+    get(k, d) { try { const v = ok ? localStorage.getItem(k) : mem[k]; return v === null || v === undefined ? d : v; } catch (e) { return d; } },
+    set(k, v) { try { if (ok) localStorage.setItem(k, v); else mem[k] = v; } catch (e) {} }
+  };
+})();
+
+/* ---------- line parsers (match TestFixtureV7.ino output) ---------- */
+const RE_LIVE = /\[LIVE\]\s+t=(\d+)\s+cyc=(\d+)\/(\d+)\s+step=(\d+)\/(\d+)\s+pos=(-?\d+)(?:\s+lc=([-+0-9.eE]+))?/;
+const RE_CAL  = /\[CAL\]\s+pos=(-?\d+)\s+raw=([-+0-9.eE]+)/;
+const RE_BUF  = /\[LCbuf\]\s+t=(\d+)\s+pos=(-?\d+)\s+lc=([-+0-9.eE]+)/;
+
+function parseLine(line) {
+  let m = line.match(RE_CAL);
+  if (m) return { kind: "cal", t: null, cycle: null, pos: +m[1], force: +m[2] };
+
+  m = line.match(RE_BUF);
+  if (m) return { kind: "buf", t: +m[1], cycle: null, pos: +m[2], force: +m[3] };
+
+  m = line.match(RE_LIVE);
+  if (m) {
+    Device.setCycles(+m[2], +m[3]);
+    return { kind: "live", t: +m[1], cycle: +m[2], pos: +m[6], force: m[7] === undefined ? null : +m[7] };
+  }
+
+  // Bare CSV: four comma separated numbers.
+  const p = line.split(",");
+  if (p.length === 4) {
+    const n = p.map(s => Number(s.trim()));
+    if (n.every(v => Number.isFinite(v))) {
+      const v6 = $("fieldOrder").value === "v6";
+      return v6
+        ? { kind: "data", t: n[0], cycle: n[1], pos: n[2], force: n[3] }
+        : { kind: "data", t: n[1], cycle: n[0], pos: n[2], force: n[3] };
+    }
+  }
+  return null;
+}
+
+function classify(line, parsed) {
+  if (parsed) return "k-" + (parsed.kind === "live" || parsed.kind === "data" ? "data" : parsed.kind);
+  if (/\b(ERR|ERROR|FAIL|TRIP|LC_TRIP|Could not|WARN)\b/i.test(line)) return "k-err";
+  if (/^\s*\[/.test(line)) return "k-tag";
+  return "";
+}
+
+/* ============================================================
+   State
+   ============================================================ */
+const S = {
+  port: null, reader: null, keepReading: false,
+  connected: false,
+  lines: 0, rows: [], rawText: [],
+  plot: [],                       // {t, pos, force}  — as received from the fixture
+  min: null, max: null,
+  rateWin: [], lastRateCalc: 0,
+  history: [], histIdx: -1,
+  paused: false, showTs: true, showChart: true,
+  filterFn: null,
+  pending: [],                    // lines waiting for the next frame
+  rxTimer: null
+};
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* Fixture status parsed from USB serial (mode, cycles, dwell, run state). */
+const Device = {
+  mode: "—",
+  state: "idle",
+  cycDone: null,
+  cycGoal: null,
+  invertForce: false,
+  invertPos: false,
+  invertJog: false,
+  dwellEnd: 0,
+
+  dispForce(v) { return this.invertForce && Number.isFinite(v) ? -v : v; },
+  dispPos(v) { return this.invertPos && Number.isFinite(v) ? -v : v; },
+
+  setCycles(done, goal) {
+    if (Number.isFinite(done)) this.cycDone = done;
+    if (Number.isFinite(goal)) this.cycGoal = goal;
+    this.refresh();
+  },
+  setMode(mode) {
+    if (mode) this.mode = String(mode).replace(/,$/, "").toLowerCase();
+    this.refresh();
+  },
+  setState(state) {
+    this.state = state;
+    if (state !== "running" && state !== "dwell") this.dwellEnd = 0;
+    this.refresh();
+  },
+  startDwell(ms) {
+    this.dwellEnd = performance.now() + ms;
+    this.state = "dwell";
+    this.refresh();
+  },
+  refresh() {
+    const modeEl = $("pillMode"), stateEl = $("pillState");
+    if (modeEl) modeEl.textContent = "mode " + this.mode;
+    if (stateEl) {
+      stateEl.textContent = this.state;
+      stateEl.className = "pill" + (
+        this.state === "running" || this.state === "dwell" ? " run" :
+        this.state === "paused" ? " pause" :
+        this.state === "complete" ? " done" :
+        this.state === "trip" ? " err" : ""
+      );
+    }
+    led("ledRun", this.state === "running" || this.state === "dwell");
+    if (this.cycDone !== null) {
+      const txt = this.cycDone + " / " + (this.cycGoal !== null ? this.cycGoal : "—");
+      $("rdCycle").textContent = txt;
+      const rfc = $("runFixCyc");
+      if (rfc) rfc.textContent = txt;
+    }
+    const rsl = $("runStateLbl");
+    if (rsl) rsl.textContent = this.state;
+  },
+  tickDwell() {
+    const el = $("rdDwell");
+    if (!el) return;
+    if (!this.dwellEnd) {
+      if (el.textContent !== "—") el.textContent = "—";
+      return;
+    }
+    const left = Math.max(0, this.dwellEnd - performance.now());
+    el.textContent = (left / 1000).toFixed(1) + " s";
+    if (left <= 0) {
+      this.dwellEnd = 0;
+      if (this.state === "dwell") this.setState("running");
+    }
+  },
+  feed(line) {
+    let m = line.match(/^Mode\s*->\s*(\S+)/i);
+    if (m) { this.setMode(m[1]); return; }
+
+    m = line.match(/^Mode:\s+(\S+)\s+State:\s+(\S+)/i);
+    if (m) {
+      this.setMode(m[1]);
+      this.setState(m[2].toLowerCase());
+    }
+
+    m = line.match(/^Cycles:\s+(\d+)\s*\/\s*(\d+)/);
+    if (m) { this.setCycles(+m[1], +m[2]); return; }
+
+    m = line.match(/\[TEST\]\s+Cycles:\s+(\d+)\s*\/\s*(\d+)/);
+    if (m) { this.setCycles(+m[1], +m[2]); return; }
+
+    m = line.match(/\[TEST\]\s+Cycle count reset to\s+(\d+)\s*\/\s*(\d+)/);
+    if (m) { this.setCycles(+m[1], +m[2]); this.setState("idle"); return; }
+
+    m = line.match(/\[TEST\]\s+STOPPED at\s+(\d+)\s*\/\s*(\d+)/);
+    if (m) { this.setCycles(+m[1], +m[2]); this.setState("idle"); return; }
+
+    m = line.match(/\[TEST\]\s+Cycle\s+(\d+)\s*\/\s*(\d+)\s+complete/);
+    if (m) { this.setCycles(+m[1], +m[2]); return; }
+
+    m = line.match(/\[TEST\]\s+START toward absolute target\s+(\d+)\s+\(now\s+(\d+)\s*\/\s*(\d+)/);
+    if (m) { this.setCycles(+m[2], +m[1]); this.setState("running"); return; }
+
+    m = line.match(/\[TEST\]\s+Already at\/above target\s+\((\d+)\s*\/\s*(\d+)/);
+    if (m) { this.setCycles(+m[1], +m[2]); this.setState("complete"); return; }
+
+    if (/\[TEST\]\s+PAUSED/.test(line)) { this.setState("paused"); return; }
+    if (/\[TEST\]\s+RESUMED/.test(line)) { this.setState("running"); return; }
+    if (/\[TEST\]\s+All cycles complete/.test(line)) { this.setState("complete"); return; }
+    if (/LC LIMIT EXCEEDED/.test(line)) { this.setState("trip"); return; }
+
+    m = line.match(/\[TEST\]\s+Step\s+\d+:\s+DWELL\s+(\d+)\s+ms/);
+    if (m) { this.startDwell(+m[1]); return; }
+    if (/\[TEST\]\s+Step\s+\d+:/.test(line)) {
+      this.dwellEnd = 0;
+      if (this.state === "dwell") this.setState("running");
+    }
+
+    m = line.match(/cyc=(\d+)\s*\/\s*(\d+)/);
+    if (m) this.setCycles(+m[1], +m[2]);
+  }
+};
+
+/* ============================================================
+   Monitor rendering
+   ============================================================ */
+const mon = $("monitor");
+let renderQueued = false;
+
+function pushScreen(text, cls) {
+  S.pending.push({ text, cls, ts: new Date() });
+  if (!renderQueued) { renderQueued = true; requestAnimationFrame(flushScreen); }
+}
+
+function matchesFilter(text) { return !S.filterFn || S.filterFn(text); }
+
+function tsPrefix(d) {
+  const p = n => String(n).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) + "." + String(d.getMilliseconds()).padStart(3, "0");
+}
+
+function flushScreen() {
+  renderQueued = false;
+  if (!S.pending.length) return;
+  const batch = S.pending;
+  S.pending = [];
+
+  const frag = document.createDocumentFragment();
+
+  for (const item of batch) {
+    if (!matchesFilter(item.text)) continue;
+    const el = document.createElement("span");
+    el.className = "ln";
+    if (S.showTs) {
+      const t = document.createElement("span");
+      t.className = "ts";
+      t.textContent = tsPrefix(item.ts) + "  ";
+      el.appendChild(t);
+    }
+    const body = document.createElement("span");
+    if (item.cls) body.className = item.cls;
+    body.textContent = item.text;
+    el.appendChild(body);
+    frag.appendChild(el);
+  }
+  mon.appendChild(frag);
+
+  let excess = mon.childElementCount - MAX_SCREEN_LINES;
+  while (excess-- > 0 && mon.firstChild) mon.removeChild(mon.firstChild);
+
+  if (!S.paused) mon.scrollTop = mon.scrollHeight;
+}
+
+function redrawFromBuffer() {
+  mon.textContent = "";
+  const start = Math.max(0, S.rawText.length - MAX_SCREEN_LINES);
+  const frag = document.createDocumentFragment();
+  for (let i = start; i < S.rawText.length; i++) {
+    const rec = S.rawText[i];
+    if (!matchesFilter(rec.text)) continue;
+    const el = document.createElement("span");
+    el.className = "ln";
+    if (S.showTs) {
+      const t = document.createElement("span");
+      t.className = "ts";
+      t.textContent = tsPrefix(rec.ts) + "  ";
+      el.appendChild(t);
+    }
+    const body = document.createElement("span");
+    if (rec.cls) body.className = rec.cls;
+    body.textContent = rec.text;
+    el.appendChild(body);
+    frag.appendChild(el);
+  }
+  mon.appendChild(frag);
+  mon.scrollTop = mon.scrollHeight;
+}
+
+/* ============================================================
+   Readouts, stats, chart
+   ============================================================ */
+function fmt(v, dp) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  return v.toFixed(dp === undefined ? 3 : dp);
+}
+
+function updateReadouts(p) {
+  if (!p) return;
+  if (p.force !== null && Number.isFinite(p.force)) {
+    const f = Device.dispForce(p.force);
+    $("rdForce").textContent = p.kind === "cal" ? f.toFixed(1) : f.toFixed(3);
+    S.min = S.min === null ? f : Math.min(S.min, f);
+    S.max = S.max === null ? f : Math.max(S.max, f);
+    $("rdRange").textContent = fmt(S.min, 2) + " / " + fmt(S.max, 2);
+  }
+  if (Number.isFinite(p.pos)) $("rdPos").textContent = Device.dispPos(p.pos).toString();
+  if (p.kind !== "cal" && Number.isFinite(p.cycle)) Device.setCycles(p.cycle, undefined);
+  if (p.t !== null && Number.isFinite(p.t)) $("rdTime").textContent = (p.t / 1000).toFixed(2) + " s";
+
+  if (Number.isFinite(p.pos) && Number.isFinite(p.force)) {
+    S.plot.push({ t: p.t, pos: p.pos, force: p.force });
+    if (S.plot.length > MAX_PLOT_POINTS) S.plot.splice(0, S.plot.length - MAX_PLOT_POINTS);
+    chartDirty = true;
+  }
+}
+
+setInterval(() => {
+  const now = performance.now();
+  S.rateWin = S.rateWin.filter(t => now - t < 1000);
+  $("rdRate").textContent = S.rateWin.length.toFixed(1);
+  Device.tickDwell();
+}, 500);
+
+/* --- strip chart --- */
+const cv = $("chart"), ctx = cv.getContext("2d");
+let chartDirty = false;
+
+function sizeCanvas() {
+  const r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.round(r.width * dpr));
+  cv.height = Math.max(1, Math.round(r.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  chartDirty = true;
+}
+window.addEventListener("resize", sizeCanvas);
+
+function drawChart() {
+  if (!S.showChart) return;
+  const r = cv.getBoundingClientRect();
+  const W = r.width, H = r.height, pad = 26;
+  ctx.clearRect(0, 0, W, H);
+
+  // grid
+  ctx.strokeStyle = "#1e2a27"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + (H - 2 * pad) * i / 4;
+    ctx.moveTo(pad, y); ctx.lineTo(W - pad, y);
+  }
+  ctx.stroke();
+
+  const pts = S.plot;
+  if (pts.length < 2) {
+    ctx.fillStyle = "#4c5b57";
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText("waiting for data…", pad, H / 2);
+    return;
+  }
+
+  const mode = $("chartMode").value;
+  const fVals = pts.map(p => Device.dispForce(p.force)), pVals = pts.map(p => Device.dispPos(p.pos));
+  const fMin = Math.min(...fVals), fMax = Math.max(...fVals);
+  const pMin = Math.min(...pVals), pMax = Math.max(...pVals);
+  const span = (a, b) => (b - a) || 1;
+
+  const yF = v => H - pad - (v - fMin) / span(fMin, fMax) * (H - 2 * pad);
+  const yP = v => H - pad - (v - pMin) / span(pMin, pMax) * (H - 2 * pad);
+
+  ctx.lineWidth = 1.4;
+
+  if (mode === "xy") {
+    const x = v => pad + (v - pMin) / span(pMin, pMax) * (W - 2 * pad);
+    ctx.strokeStyle = "#f0a71c";
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(x(Device.dispPos(p.pos)), yF(Device.dispForce(p.force))) : ctx.moveTo(x(Device.dispPos(p.pos)), yF(Device.dispForce(p.force))));
+    ctx.stroke();
+    label(pad, H - 6, "pos " + pMin + " … " + pMax);
+  } else {
+    const x = i => pad + i / (pts.length - 1) * (W - 2 * pad);
+    ctx.strokeStyle = "#5fd0b4"; ctx.globalAlpha = .65;
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(x(i), yP(Device.dispPos(p.pos))) : ctx.moveTo(x(i), yP(Device.dispPos(p.pos))));
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#f0a71c";
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(x(i), yF(Device.dispForce(p.force))) : ctx.moveTo(x(i), yF(Device.dispForce(p.force))));
+    ctx.stroke();
+    label(pad, H - 6, pts.length + " samples");
+  }
+
+  ctx.fillStyle = "#f0a71c";
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.fillText(fMax.toFixed(2), 3, pad + 4);
+  ctx.fillText(fMin.toFixed(2), 3, H - pad + 4);
+
+  function label(x, y, s) {
+    ctx.fillStyle = "#4c5b57"; ctx.font = "10px ui-monospace, monospace"; ctx.fillText(s, x, y);
+  }
+}
+
+(function chartLoop() {
+  if (chartDirty) { chartDirty = false; drawChart(); }
+  requestAnimationFrame(chartLoop);
+})();
+
+/* ============================================================
+   CSV file logging (File System Access API)
+   ============================================================ */
+const HEADERS = ["pc_time_iso", "cycle", "device_timestamp", "position", "force", "raw_line"];
+
+const FileLog = {
+  dir: null, handle: null, name: "", size: 0, part: 1, day: "",
+  queue: [], queueBytes: 0, busy: false, active: false, timer: null,
+
+  supported() { return typeof window.showDirectoryPicker === "function"; },
+
+  async pickFolder() {
+    this.dir = await window.showDirectoryPicker({ mode: "readwrite", id: "fixture-logs" });
+    $("btnLogToggle").disabled = false;
+    $("logPath").textContent = "Folder: " + this.dir.name + " — press Start logging.";
+  },
+
+  today() {
+    const d = new Date(), p = n => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  },
+
+  fileName() {
+    const test = ($("testName").value.trim() || "run").replace(/[^\w.-]+/g, "_");
+    return "esp32_" + test + "_" + this.day + "_part" + String(this.part).padStart(2, "0") + ".csv";
+  },
+
+  async openFile() {
+    this.name = this.fileName();
+    this.handle = await this.dir.getFileHandle(this.name, { create: true });
+    const f = await this.handle.getFile();
+    this.size = f.size;
+    if (this.size === 0) {
+      this.queue.unshift(HEADERS.join(",") + "\r\n");
+    }
+    $("logPath").textContent = this.dir.name + " / " + this.name;
+    $("statFile").textContent = this.name;
+  },
+
+  async start() {
+    this.day = this.today();
+    this.part = 1;
+    // Skip past existing parts from today so nothing gets clobbered.
+    for (;;) {
+      const n = this.fileName();
+      let exists = true;
+      try { await this.dir.getFileHandle(n, { create: false }); }
+      catch (e) { exists = false; }
+      if (!exists) break;
+      const h = await this.dir.getFileHandle(n);
+      const f = await h.getFile();
+      if (f.size < this.maxBytes()) break;   // resume appending to this one
+      this.part++;
+    }
+    await this.openFile();
+    this.active = true;
+    const secs = Math.max(1, +$("flushSec").value || 2);
+    this.timer = setInterval(() => this.flush(), secs * 1000);
+    led("ledLog", true);
+  },
+
+  async stop() {
+    this.active = false;
+    clearInterval(this.timer); this.timer = null;
+    await this.flush();
+    led("ledLog", false);
+  },
+
+  maxBytes() { return Math.max(1, +$("maxMb").value || 10) * 1024 * 1024; },
+
+  push(text) {
+    if (!this.active) return;
+    this.queue.push(text);
+    this.queueBytes += text.length;
+    if (this.queueBytes > 65536) this.flush();
+  },
+
+  async flush() {
+    if (this.busy || !this.handle || !this.queue.length) return;
+    this.busy = true;
+    const chunk = this.queue.join("");
+    this.queue = []; this.queueBytes = 0;
+    try {
+      const w = await this.handle.createWritable({ keepExistingData: true });
+      await w.seek(this.size);
+      await w.write(chunk);
+      await w.close();                       // commit now, so a power cut can't lose it
+      this.size += chunk.length;
+
+      if (this.day !== this.today()) { this.day = this.today(); this.part = 1; await this.openFile(); }
+      else if (this.size >= this.maxBytes()) { this.part++; await this.openFile(); }
+    } catch (e) {
+      setStatus("Write failed: " + e.message, true);
+      this.queue.unshift(chunk);
+    } finally {
+      this.busy = false;
+    }
+  }
+};
+
+function csvEscape(v) {
+  const s = v === null || v === undefined ? "" : String(v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/* ============================================================
+   Serial
+   ============================================================ */
+function led(id, on, err) {
+  const el = $(id);
+  el.classList.toggle("on", !!on);
+  el.classList.toggle("err", !!err);
+}
+
+function setStatus(msg, isErr) {
+  $("statusText").textContent = msg;
+  $("status").classList.toggle("err", !!isErr);
+}
+
+function sysLine(msg) {
+  const rec = { text: msg, cls: "k-sys", ts: new Date() };
+  S.rawText.push(rec);
+  pushScreen(msg, "k-sys");
+}
+
+async function connect() {
+  if (!("serial" in navigator)) {
+    setStatus("This browser has no Web Serial API. Use Chrome or Edge, opened from a local file or https.", true);
+    return;
+  }
+  try {
+    S.port = await navigator.serial.requestPort();
+    await S.port.open({ baudRate: +$("baud").value || 115200, bufferSize: 16384 });
+  } catch (e) {
+    if (e.name !== "NotFoundError") setStatus("Could not open port: " + e.message, true);
+    return;
+  }
+  S.connected = true;
+  S.keepReading = true;
+  led("ledLink", true);
+  $("btnConnect").textContent = "Disconnect";
+  $("cmd").disabled = false; $("btnSend").disabled = false;
+  $("cmd").focus();
+  setStatus("Connected at " + $("baud").value + " baud.");
+  sysLine("--- connected ---");
+  readLoop();
+  setTimeout(() => { if (S.connected) send("status"); }, 400);
+}
+
+async function readLoop() {
+  const dec = new TextDecoder();
+  let buf = "";
+  while (S.port && S.port.readable && S.keepReading) {
+    S.reader = S.port.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await S.reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).replace(/\r$/, "");
+          buf = buf.slice(i + 1);
+          if (line.length) handleLine(line);
+        }
+        if (buf.length > 32768) buf = "";   // runaway guard
+      }
+    } catch (e) {
+      if (S.keepReading) setStatus("Read error: " + e.message, true);
+    } finally {
+      try { S.reader.releaseLock(); } catch (e) {}
+    }
+  }
+}
+
+async function disconnect() {
+  S.keepReading = false;
+  try { if (S.reader) await S.reader.cancel(); } catch (e) {}
+  try { if (S.port) await S.port.close(); } catch (e) {}
+  S.port = null; S.connected = false;
+  led("ledLink", false); led("ledRx", false); led("ledRun", false);
+  Device.setState("idle");
+  $("btnConnect").textContent = "Connect";
+  $("cmd").disabled = true; $("btnSend").disabled = true;
+  setStatus("Disconnected.");
+  sysLine("--- disconnected ---");
+}
+
+function handleLine(line) {
+  const now = new Date();
+  const parsed = parseLine(line);
+  const cls = classify(line, parsed);
+
+  S.lines++;
+  S.rateWin.push(performance.now());
+  S.rawText.push({ text: line, cls, ts: now });
+  if (S.rawText.length > MAX_ROWS) S.rawText.splice(0, S.rawText.length - MAX_ROWS);
+
+  const row = parsed
+    ? [now.toISOString(), parsed.cycle ?? "", parsed.t ?? "", parsed.pos ?? "", parsed.force ?? "", line]
+    : [now.toISOString(), "", "", "", "", line];
+  S.rows.push(row);
+  if (S.rows.length > MAX_ROWS) S.rows.splice(0, S.rows.length - MAX_ROWS);
+  FileLog.push(row.map(csvEscape).join(",") + "\r\n");
+
+  updateReadouts(parsed);
+  pushScreen(line, cls);
+  Device.feed(line);
+  CalSweep.feed(line, parsed);
+  Runs.feed(line, parsed, now);
+
+  led("ledRx", true);
+  clearTimeout(S.rxTimer);
+  S.rxTimer = setTimeout(() => led("ledRx", false), 90);
+
+  $("statLines").textContent = S.lines.toLocaleString() + " lines";
+  $("bufInfo").textContent = S.rows.length.toLocaleString() + " rows held in memory.";
+}
+
+function eolSuffix() {
+  switch ($("eol").value) {
+    case "crlf": return "\r\n";
+    case "cr":   return "\r";
+    case "none": return "";
+    default:     return "\n";
+  }
+}
+
+async function send(text) {
+  if (!S.port || !S.port.writable) { setStatus("Connect first.", true); return false; }
+  try {
+    const w = S.port.writable.getWriter();
+    await w.write(new TextEncoder().encode(text + eolSuffix()));
+    w.releaseLock();
+    const rec = { text: ">> " + text, cls: "k-echo", ts: new Date() };
+    S.rawText.push(rec);
+    pushScreen(rec.text, "k-echo");
+    return true;
+  } catch (e) {
+    setStatus("Send failed: " + e.message, true);
+    return false;
+  }
+}
+
+/* ============================================================
+   UI wiring
+   ============================================================ */
+$("btnConnect").addEventListener("click", () => S.connected ? disconnect() : connect());
+
+$("btnSend").addEventListener("click", submitCmd);
+$("cmd").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); submitCmd(); }
+  else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (!S.history.length) return;
+    S.histIdx = S.histIdx < 0 ? S.history.length - 1 : Math.max(0, S.histIdx - 1);
+    $("cmd").value = S.history[S.histIdx];
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (S.histIdx < 0) return;
+    S.histIdx++;
+    if (S.histIdx >= S.history.length) { S.histIdx = -1; $("cmd").value = ""; }
+    else $("cmd").value = S.history[S.histIdx];
+  }
+});
+
+function submitCmd() {
+  const v = $("cmd").value;
+  if (!v) return;
+  send(v);
+  S.history.push(v);
+  if (S.history.length > 200) S.history.shift();
+  S.histIdx = -1;
+  $("cmd").value = "";
+}
+
+/* command buttons — plain and templated */
+function applyJogPolarity(cmd) {
+  if (!Device.invertJog) return cmd;
+  const m = String(cmd).match(/^jog\s+(-?\d+)\s*$/i);
+  return m ? ("jog " + (-Number(m[1]))) : cmd;
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-cmd],[data-tpl]");
+  if (!b) return;
+  let cmd = b.dataset.cmd;
+  if (!cmd && b.dataset.tpl) {
+    cmd = b.dataset.tpl.replace(/\{(\w+)\}/g, (_, id) => {
+      const el = $(id);
+      return el ? el.value.trim() : "";
+    });
+  }
+  if (cmd === "cycles reset") { Runs.resetCycles(); return; }
+  if (cmd) send(applyJogPolarity(cmd));
+});
+
+/* toggles */
+function toggle(btn, key, label, cb) {
+  $(btn).addEventListener("click", () => {
+    S[key] = !S[key];
+    $(btn).setAttribute("aria-pressed", String(S[key]));
+    $(btn).textContent = label + ": " + (S[key] ? "on" : "off");
+    if (cb) cb();
+  });
+}
+$("btnScroll").addEventListener("click", () => {
+  S.paused = !S.paused;                       // paused === auto-scroll off
+  $("btnScroll").setAttribute("aria-pressed", String(!S.paused));
+  $("btnScroll").textContent = "Auto-scroll: " + (S.paused ? "off" : "on");
+});
+toggle("btnTs", "showTs", "Timestamps", redrawFromBuffer);
+toggle("btnChart", "showChart", "Chart", () => {
+  $("chartWrap").classList.toggle("hidden", !S.showChart);
+  if (S.showChart) { sizeCanvas(); }
+});
+$("chartMode").addEventListener("change", () => { chartDirty = true; });
+
+$("btnClear").addEventListener("click", () => {
+  mon.textContent = "";
+  S.rawText.length = 0;
+  S.plot.length = 0;
+  chartDirty = true;
+});
+
+$("btnCopy").addEventListener("click", async () => {
+  const text = S.rawText.map(r => r.text).join("\n");
+  try { await navigator.clipboard.writeText(text); setStatus("Screen copied to clipboard."); }
+  catch (e) { setStatus("Clipboard blocked by the browser.", true); }
+});
+
+$("btnResetStats").addEventListener("click", () => {
+  S.min = S.max = null; S.lines = 0; S.plot.length = 0;
+  $("rdRange").textContent = "—"; $("statLines").textContent = "0 lines";
+  chartDirty = true;
+});
+
+/* filter */
+$("filter").addEventListener("input", () => {
+  const v = $("filter").value.trim();
+  if (!v) S.filterFn = null;
+  else if (v.length > 2 && v.startsWith("/") && v.endsWith("/")) {
+    try { const re = new RegExp(v.slice(1, -1), "i"); S.filterFn = s => re.test(s); }
+    catch (e) { S.filterFn = s => s.includes(v); }
+  } else {
+    const lower = v.toLowerCase();
+    S.filterFn = s => s.toLowerCase().includes(lower);
+  }
+  redrawFromBuffer();
+});
+
+/* rail tabs */
+document.querySelectorAll(".rail-tabs button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".rail-tabs button").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+    document.querySelectorAll(".rail-panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + b.dataset.tab));
+  });
+});
+
+/* presets */
+function loadPresets() { try { return JSON.parse(store.get("presets", "[]")); } catch (e) { return []; } }
+function renderPresets() {
+  const list = $("presetList");
+  list.textContent = "";
+  const presets = loadPresets();
+  if (!presets.length) {
+    const d = document.createElement("div");
+    d.className = "hint"; d.style.padding = "6px";
+    d.textContent = "No presets yet.";
+    list.appendChild(d);
+    return;
+  }
+  const wrap = document.createElement("div");
+  presets.forEach((cmd, i) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const b = document.createElement("button");
+    b.className = "btn tiny mono"; b.style.flex = "1"; b.textContent = cmd;
+    b.addEventListener("click", () => send(cmd));
+    const x = document.createElement("button");
+    x.className = "btn tiny"; x.textContent = "×"; x.title = "Remove preset";
+    x.addEventListener("click", () => {
+      const p = loadPresets(); p.splice(i, 1); store.set("presets", JSON.stringify(p)); renderPresets();
+    });
+    row.appendChild(b); row.appendChild(x);
+    wrap.appendChild(row);
+  });
+  list.appendChild(wrap);
+}
+$("btnAddPreset").addEventListener("click", () => {
+  const v = $("presetNew").value.trim();
+  if (!v) return;
+  const p = loadPresets(); p.push(v); store.set("presets", JSON.stringify(p));
+  $("presetNew").value = ""; renderPresets();
+});
+renderPresets();
+
+/* logging */
+$("btnPickDir").addEventListener("click", async () => {
+  if (!FileLog.supported()) {
+    setStatus("This browser can't write folders directly. Use Download CSV instead.", true);
+    return;
+  }
+  try { await FileLog.pickFolder(); }
+  catch (e) { if (e.name !== "AbortError") setStatus("Folder not opened: " + e.message, true); }
+});
+
+$("btnLogToggle").addEventListener("click", async () => {
+  if (FileLog.active) {
+    await FileLog.stop();
+    $("btnLogToggle").textContent = "Start logging";
+    setStatus("Logging stopped. File committed.");
+  } else {
+    try {
+      await FileLog.start();
+      $("btnLogToggle").textContent = "Stop logging";
+      setStatus("Logging to " + FileLog.name);
+    } catch (e) { setStatus("Could not start logging: " + e.message, true); }
+  }
+});
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type: type || "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+$("btnDownload").addEventListener("click", () => {
+  const test = ($("testName").value.trim() || "run").replace(/[^\w.-]+/g, "_");
+  const body = [HEADERS.join(",")].concat(S.rows.map(r => r.map(csvEscape).join(","))).join("\r\n");
+  download("esp32_" + test + "_" + FileLog.today() + "_session.csv", body, "text/csv");
+});
+
+$("btnDownloadTxt").addEventListener("click", () => {
+  const test = ($("testName").value.trim() || "run").replace(/[^\w.-]+/g, "_");
+  download("esp32_" + test + "_" + FileLog.today() + "_session.txt", S.rawText.map(r => r.text).join("\n"));
+});
+
+/* sequence upload */
+$("btnSendSeq").addEventListener("click", async () => {
+  const lines = $("seqText").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (!lines.length) { $("seqStatus").textContent = "Nothing to send."; return; }
+  if (!S.connected) { $("seqStatus").textContent = "Connect first."; return; }
+  const gap = Math.max(0, +$("seqGap").value || 0);
+  const btn = $("btnSendSeq");
+  btn.disabled = true;
+  await send("upload seq");
+  for (let i = 0; i < lines.length; i++) {
+    await new Promise(r => setTimeout(r, gap));
+    await send(lines[i]);
+    $("seqStatus").textContent = "Sent " + (i + 1) + " / " + lines.length;
+  }
+  await new Promise(r => setTimeout(r, gap));
+  await send("END");
+  $("seqStatus").textContent = "Uploaded " + lines.length + " lines. Check 'list seq'.";
+  btn.disabled = false;
+});
+
+/* remember simple settings */
+["baud", "eol", "testName", "maxMb", "flushSec", "fieldOrder", "seqGap",
+ "calKnownWeight", "knownWeight", "calMaxTorque", "calSpr", "runCycles",
+ "setSpeed", "setAccel", "setSpr", "setLcUpper", "setLcLower",
+ "setSeekKp", "setSeekVmax", "runLcEvery", "runLcList", "lcCyclesList"].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  const saved = store.get("cfg." + id, null);
+  if (saved !== null) el.value = saved;
+  el.addEventListener("change", () => store.set("cfg." + id, el.value));
+});
+
+function bindPolarity(id, key, label) {
+  const btn = $(id);
+  Device[key] = store.get("pol." + key, "0") === "1";
+  const render = () => {
+    btn.setAttribute("aria-pressed", String(Device[key]));
+    btn.classList.toggle("on", Device[key]);
+    btn.textContent = label + ": " + (Device[key] ? "inverted" : "normal");
+  };
+  render();
+  btn.addEventListener("click", () => {
+    Device[key] = !Device[key];
+    store.set("pol." + key, Device[key] ? "1" : "0");
+    render();
+    if (key === "invertForce" && S.min !== null && S.max !== null) {
+      const t = S.min; S.min = -S.max; S.max = -t;
+      $("rdRange").textContent = fmt(S.min, 2) + " / " + fmt(S.max, 2);
+    }
+    if (S.plot.length) {
+      const last = S.plot[S.plot.length - 1];
+      if (Number.isFinite(last.force)) $("rdForce").textContent = Device.dispForce(last.force).toFixed(3);
+      if (Number.isFinite(last.pos)) $("rdPos").textContent = String(Device.dispPos(last.pos));
+    }
+    chartDirty = true;
+    Runs.draw();
+  });
+}
+bindPolarity("btnInvForce", "invertForce", "Force polarity");
+bindPolarity("btnInvPos", "invertPos", "Position polarity");
+bindPolarity("btnInvJog", "invertJog", "Jog polarity");
+
+$("btnWipeAll").addEventListener("click", async () => {
+  if (!confirm("Wipe config, sequence, AND saved cycle progress from the fixture NVS?")) return;
+  await send("wipe");
+});
+
+function syncLcProfileUi() {
+  const v = $("runLcProfile").value;
+  $("runLcEveryWrap").style.display = v === "every" ? "" : "none";
+  $("runLcListWrap").style.display = v === "list" ? "" : "none";
+}
+$("runLcProfile").addEventListener("change", syncLcProfileUi);
+syncLcProfileUi();
+
+/* keyboard */
+document.addEventListener("keydown", e => {
+  if (e.ctrlKey && e.key.toLowerCase() === "l") { e.preventDefault(); $("btnClear").click(); }
+  if (e.key === "Escape" && document.activeElement !== $("cmd") && S.connected) $("cmd").focus();
+});
+
+/* housekeeping */
+window.addEventListener("beforeunload", e => {
+  if (FileLog.active && FileLog.queue.length) { FileLog.flush(); e.preventDefault(); e.returnValue = ""; }
+});
+if ("serial" in navigator) {
+  navigator.serial.addEventListener("disconnect", () => {
+    if (S.connected) { setStatus("Fixture unplugged.", true); disconnect(); }
+  });
+} else {
+  setStatus("Web Serial not available. Open this file in Chrome or Edge.", true);
+}
+
+/* ============================================================
+   Minimal multi-sheet .xlsx writer (store-only ZIP, inline strings)
+   ============================================================ */
+/* Minimal multi-sheet .xlsx writer — store-only ZIP, inline strings.
+   sheets: [{name, rows:[[cell,...],...]}]  cell = number | string | null   */
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function xmlEsc(s) {
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    // strip control chars Excel rejects
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
+}
+
+function colName(n) {                    // 0 -> A
+  let s = "";
+  n += 1;
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - 1 - r) / 26; }
+  return s;
+}
+
+function safeSheetName(name, used) {
+  let s = String(name).replace(/[\\\/\?\*\[\]:]/g, "-").slice(0, 31) || "Sheet";
+  let base = s, i = 2;
+  while (used.has(s.toLowerCase())) { s = (base.slice(0, 28) + "_" + i).slice(0, 31); i++; }
+  used.add(s.toLowerCase());
+  return s;
+}
+
+function sheetXml(rows) {
+  const out = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+  ];
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r] || [];
+    out.push('<row r="' + (r + 1) + '">');
+    for (let c = 0; c < row.length; c++) {
+      const v = row[c];
+      if (v === null || v === undefined || v === "") continue;
+      const ref = colName(c) + (r + 1);
+      if (typeof v === "number" && Number.isFinite(v)) {
+        out.push('<c r="' + ref + '"><v>' + v + '</v></c>');
+      } else {
+        out.push('<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(v) + '</t></is></c>');
+      }
+    }
+    out.push('</row>');
+  }
+  out.push('</sheetData></worksheet>');
+  return out.join("");
+}
+
+function buildXlsx(sheets) {
+  const enc = new TextEncoder();
+  const used = new Set();
+  const names = sheets.map(s => safeSheetName(s.name, used));
+
+  const files = [];
+  files.push(["[Content_Types].xml",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    sheets.map((_, i) =>
+      '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    ).join("") +
+    '</Types>']);
+
+  files.push(["_rels/.rels",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>']);
+
+  files.push(["xl/workbook.xml",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+    names.map((n, i) => '<sheet name="' + xmlEsc(n) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>').join("") +
+    '</sheets></workbook>']);
+
+  files.push(["xl/_rels/workbook.xml.rels",
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    names.map((_, i) =>
+      '<Relationship Id="rId' + (i + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>'
+    ).join("") +
+    '</Relationships>']);
+
+  sheets.forEach((s, i) => files.push(["xl/worksheets/sheet" + (i + 1) + ".xml", sheetXml(s.rows)]));
+
+  // ---- store-only ZIP ----
+  const parts = [], central = [];
+  let offset = 0;
+  const now = new Date();
+  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+
+  for (const [name, text] of files) {
+    const nameBytes = enc.encode(name);
+    const data = enc.encode(text);
+    const crc = crc32(data);
+
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);        // version needed
+    lv.setUint16(6, 0x0800, true);    // UTF-8 flag
+    lv.setUint16(8, 0, true);         // stored
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, data.length, true);
+    lv.setUint32(22, data.length, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+
+    parts.push(local, data);
+
+    const cen = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(cen.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint32(42, offset, true);
+    cen.set(nameBytes, 46);
+    central.push(cen);
+
+    offset += local.length + data.length;
+  }
+
+  const centralSize = central.reduce((a, b) => a + b.length, 0);
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, offset, true);
+
+  const all = parts.concat(central, [end]);
+  const total = all.reduce((a, b) => a + b.length, 0);
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const chunk of all) { out.set(chunk, p); p += chunk.length; }
+  return out;
+}
+
+
+/* ============================================================
+   Stage view switching
+   ============================================================ */
+document.querySelectorAll(".view-tabs button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".view-tabs button").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+    document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === "view-" + b.dataset.view));
+    requestAnimationFrame(() => {
+      sizeCanvas();
+      CalSweep.resize();
+      Runs.resize();
+    });
+  });
+});
+
+/* ============================================================
+   Robust sine fit
+   raw = A*sin(w*pos + phi) + C
+   With w held fixed the model is linear in (a, b, C), so every candidate w
+   gets an exact closed-form solve — no starting guess, no local minima.
+   ============================================================ */
+function solve3(M, y) {
+  const a = [
+    [M[0][0], M[0][1], M[0][2], y[0]],
+    [M[1][0], M[1][1], M[1][2], y[1]],
+    [M[2][0], M[2][1], M[2][2], y[2]]
+  ];
+  for (let c = 0; c < 3; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 3; r++) if (Math.abs(a[r][c]) > Math.abs(a[piv][c])) piv = r;
+    if (Math.abs(a[piv][c]) < 1e-12) return null;
+    if (piv !== c) { const t = a[piv]; a[piv] = a[c]; a[c] = t; }
+    for (let r = c + 1; r < 3; r++) {
+      const f = a[r][c] / a[c][c];
+      for (let k = c; k < 4; k++) a[r][k] -= f * a[c][k];
+    }
+  }
+  const x = [0, 0, 0];
+  for (let r = 2; r >= 0; r--) {
+    let s = a[r][3];
+    for (let k = r + 1; k < 3; k++) s -= a[r][k] * x[k];
+    x[r] = s / a[r][r];
+  }
+  return x.every(Number.isFinite) ? x : null;
+}
+
+function linSolveAtOmega(pos, raw, w, wt) {
+  let s00 = 0, s01 = 0, s02 = 0, s11 = 0, s12 = 0, s22 = 0, y0 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < pos.length; i++) {
+    const g = wt ? wt[i] : 1;
+    if (!g) continue;
+    const s = Math.sin(w * pos[i]), c = Math.cos(w * pos[i]);
+    s00 += g * s * s; s01 += g * s * c; s02 += g * s;
+    s11 += g * c * c; s12 += g * c;     s22 += g;
+    y0 += g * s * raw[i]; y1 += g * c * raw[i]; y2 += g * raw[i];
+  }
+  const x = solve3([[s00, s01, s02], [s01, s11, s12], [s02, s12, s22]], [y0, y1, y2]);
+  if (!x) return null;
+  const [a, b, C] = x;
+  return { a: a, b: b, C: C, A: Math.hypot(a, b), phi: Math.atan2(b, a), w: w };
+}
+
+function fitEval(f, p) { return f.a * Math.sin(f.w * p) + f.b * Math.cos(f.w * p) + f.C; }
+
+function fitSSE(f, pos, raw) {
+  let s = 0;
+  for (let i = 0; i < pos.length; i++) { const d = raw[i] - fitEval(f, pos[i]); s += d * d; }
+  return s;
+}
+
+function medianOf(arr) {
+  const a = arr.slice().sort((x, y) => x - y), n = a.length;
+  if (!n) return 0;
+  return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+}
+
+/*
+ * Drop HX711 framing errors before the sine fit. Matches the firmware gate:
+ *   -1              all-ones / not ready
+ *   |raw| > 24-bit  extra clocks
+ *   |raw| < 50k while neighbors are large — missed MSBs (~10k cluster)
+ *   ~0.5 x local median — missed high bit / gain 64
+ */
+function captureLooksSane(raw, lastGood) {
+  if (!Number.isFinite(raw) || raw === -1) return false;
+  if (Math.abs(raw) > 8388607) return false;
+  if (Number.isFinite(lastGood) && Math.abs(lastGood) > 200000) {
+    if (Math.abs(raw) < 50000) return false;
+    const ratio = raw / lastGood;
+    if (ratio > 0.35 && ratio < 0.65) return false;
+    if (Math.abs(raw - lastGood) > 1500000) return false;
+  }
+  return true;
+}
+
+function prefilterCalSamples(samples) {
+  const n = samples.length;
+  const raw = samples.map(s => s.raw);
+  const kept = new Array(n).fill(true);
+  const localMed = (i, half) => {
+    const vals = [];
+    for (let j = Math.max(0, i - half); j < Math.min(n, i + half + 1); j++) {
+      const v = raw[j];
+      if (v !== -1 && Math.abs(v) < 4.5e6 && Math.abs(v) > 5e4) vals.push(v);
+    }
+    return vals.length ? medianOf(vals) : null;
+  };
+  for (let i = 0; i < n; i++) {
+    const v = raw[i];
+    if (!Number.isFinite(v) || v === -1 || Math.abs(v) > 8388607) {
+      kept[i] = false;
+      continue;
+    }
+    const m = localMed(i, 8);
+    if (m == null) continue;
+    if (Math.abs(m) > 200000) {
+      if (Math.abs(v) < 50000) { kept[i] = false; continue; }
+      const ratio = v / m;
+      if (ratio > 0.35 && ratio < 0.65) { kept[i] = false; continue; }
+      if (Math.abs(v - m) > Math.max(250000, 0.25 * Math.abs(m))) kept[i] = false;
+    }
+  }
+  return kept;
+}
+
+function fitSweep(pos, raw, spr, refine, robust) {
+  if (pos.length < 8) return null;
+  const w0 = 2 * Math.PI / spr;
+  let best = linSolveAtOmega(pos, raw, w0, null);
+  if (!best) return null;
+  best.sse = fitSSE(best, pos, raw);
+
+  if (refine) {
+    const lo = w0 * 0.65, hi = w0 * 1.35, steps = 601;
+    for (let k = 0; k < steps; k++) {
+      const w = lo + (hi - lo) * k / (steps - 1);
+      const f = linSolveAtOmega(pos, raw, w, null);
+      if (!f) continue;
+      f.sse = fitSSE(f, pos, raw);
+      if (f.sse < best.sse) best = f;
+    }
+  }
+
+  let weights = null;
+  if (robust) {
+    for (let it = 0; it < 8; it++) {
+      const res = pos.map((p, i) => raw[i] - fitEval(best, p));
+      const s = 1.4826 * (medianOf(res.map(Math.abs)) || 1e-9);
+      const c = 4.685 * s;
+      weights = res.map(r => { const u = r / c; return Math.abs(u) < 1 ? Math.pow(1 - u * u, 2) : 0; });
+      const f = linSolveAtOmega(pos, raw, best.w, weights);
+      if (!f) break;
+      f.sse = fitSSE(f, pos, raw);
+      best = f;
+    }
+  }
+
+  best.residuals = pos.map((p, i) => raw[i] - fitEval(best, p));
+  best.kept = weights ? weights.map(w => w > 0.05) : pos.map(() => true);
+  const keptRes = best.residuals.filter((_, i) => best.kept[i]);
+  best.rmse = Math.sqrt(keptRes.reduce((a, r) => a + r * r, 0) / Math.max(1, keptRes.length));
+  best.rejected = best.kept.filter(k => !k).length;
+  best.sprFit = 2 * Math.PI / best.w;
+  return best;
+}
+
+/* ============================================================
+   Cal sweep
+   ============================================================ */
+const CalSweep = {
+  capturing: false,
+  samples: [],           // {pos, raw}
+  fit: null,
+  points: [],            // {raw, torque, pos, measured}
+  lastGood: NaN,
+  dropped: 0,
+  cv: null, ctx: null,
+
+  init() {
+    this.cv = $("calPlot");
+    this.ctx = this.cv.getContext("2d");
+    this.resize();
+  },
+
+  resize() {
+    if (!this.cv) return;
+    const r = this.cv.getBoundingClientRect();
+    if (!r.width) return;
+    const dpr = window.devicePixelRatio || 1;
+    this.cv.width = Math.round(r.width * dpr);
+    this.cv.height = Math.round(r.height * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.draw();
+  },
+
+  feed(line, parsed) {
+    if (!this.capturing) return;
+    if (line.indexOf("[CAL DONE]") >= 0) { this.stop(); return; }
+    if (parsed && parsed.kind === "cal") {
+      if ($("calPrefilter").checked && !captureLooksSane(parsed.force, this.lastGood)) {
+        this.dropped++;
+        $("calDropped").textContent = this.dropped;
+        return;
+      }
+      this.samples.push({ pos: parsed.pos, raw: parsed.force });
+      if (Math.abs(parsed.force) > 50000) this.lastGood = parsed.force;
+      $("calCount").textContent = this.samples.length;
+      $("calDropped").textContent = this.dropped;
+      if (this.samples.length % 25 === 0) this.draw();
+    }
+  },
+
+  start() {
+    this.samples = []; this.points = []; this.fit = null;
+    this.lastGood = NaN; this.dropped = 0;
+    this.capturing = true;
+    $("calCount").textContent = "0";
+    $("calDropped").textContent = "0";
+    $("calStart").disabled = true;
+    $("calStop").disabled = false;
+    $("calProcess").disabled = true;
+    $("calSendAll").disabled = true;
+    $("calTable").tBodies[0].textContent = "";
+    setStatus("Capturing [CAL] lines — run the sweep now.");
+    this.draw();
+  },
+
+  stop() {
+    this.capturing = false;
+    $("calStart").disabled = false;
+    $("calStop").disabled = true;
+    const n = this.samples.length;
+    $("calProcess").disabled = n < 20;
+    setStatus(n < 20
+      ? "Only " + n + " samples. Check that 'lc raw on' is set and the sweep actually ran."
+      : "Captured " + n + " samples — press Process sweep.");
+    this.draw();
+  },
+
+  clear() {
+    this.capturing = false;
+    this.samples = []; this.points = []; this.fit = null;
+    this.lastGood = NaN; this.dropped = 0;
+    $("calCount").textContent = "0";
+    $("calDropped").textContent = "0";
+    ["calA", "calPhi", "calC", "calSprFit", "calRmse", "calRej"].forEach(id => $(id).textContent = "—");
+    $("calTable").tBodies[0].textContent = "";
+    $("calStart").disabled = false;
+    $("calStop").disabled = true;
+    $("calProcess").disabled = true;
+    $("calSendAll").disabled = true;
+    $("calCollinear").classList.add("hidden");
+    this.draw();
+  },
+
+  process() {
+    const spr = +$("calSpr").value || 400;
+    const maxT = +$("calMaxTorque").value;
+    if (!Number.isFinite(maxT) || maxT === 0) { setStatus("Enter the known max torque first.", true); return; }
+
+    const preKept = $("calPrefilter").checked
+      ? prefilterCalSamples(this.samples)
+      : this.samples.map(() => true);
+    const pos = [], raw = [], srcIdx = [];
+    this.samples.forEach((s, i) => {
+      if (!preKept[i]) return;
+      pos.push(s.pos); raw.push(s.raw); srcIdx.push(i);
+    });
+    const preDropped = this.samples.length - pos.length;
+    const fit = fitSweep(pos, raw, spr, $("calRefine").checked, $("calRobust").checked);
+    if (!fit) { setStatus("Fit failed — the sweep data is degenerate (all one value?).", true); return; }
+    // Map Tukey kept-flags back onto the full captured list so the plot can
+    // show framing rejects and fit rejects in the same red.
+    const keptAll = this.samples.map((_, i) => !!preKept[i]);
+    srcIdx.forEach((si, j) => { keptAll[si] = !!fit.kept[j]; });
+    fit.kept = keptAll;
+    fit.residuals = this.samples.map((s, i) => s.raw - fitEval(fit, s.pos));
+    fit.rejected = keptAll.filter(k => !k).length;
+    this.dropped = preDropped;
+    $("calDropped").textContent = preDropped;
+    this.fit = fit;
+
+    $("calA").textContent = fit.A.toFixed(1);
+    $("calPhi").textContent = fit.phi.toFixed(4) + " rad";
+    $("calC").textContent = fit.C.toFixed(1);
+    $("calSprFit").textContent = fit.sprFit.toFixed(1);
+    $("calRmse").textContent = fit.rmse.toFixed(1);
+    $("calRej").textContent = fit.rejected + " / " + this.samples.length;
+
+    const drift = Math.abs(fit.sprFit - spr) / spr;
+    if (drift > 0.05) {
+      setStatus("Fit period is " + fit.sprFit.toFixed(0) + " steps vs the " + spr +
+                " you entered — check steps/rev or the drive ratio.", true);
+    } else {
+      setStatus("Fit OK. RMSE " + fit.rmse.toFixed(1) + " counts, " + fit.rejected + " samples rejected.");
+    }
+
+    // torque at a position, from the fitted phase
+    const torqueAt = p => maxT * Math.sin(fit.w * p + fit.phi);
+
+    const N = Math.max(2, Math.min(30, +$("calN").value || 10));
+    const useFitted = $("calSource").value === "fitted";
+    const byValue = $("calSpacing").value === "value";
+    $("calCollinear").classList.toggle("hidden", !useFitted);
+
+    // work from the samples the fit kept
+    const keep = this.samples.filter((_, i) => fit.kept[i]);
+    if (keep.length < N) { setStatus("Too few clean samples for " + N + " points.", true); return; }
+    const sorted = keep.slice().sort((a, b) => a.raw - b.raw);
+
+    const picks = [];
+    if (byValue) {
+      // even across the raw ADC range — a sine spends most of its time near the
+      // peaks, so even-by-rank crowds points at the ends
+      const lo = fitEval(fit, sorted[0].pos), hi = fitEval(fit, sorted[sorted.length - 1].pos);
+      const rMin = Math.min(lo, hi), rMax = Math.max(lo, hi);
+      for (let k = 0; k < N; k++) {
+        const target = rMin + (rMax - rMin) * k / (N - 1);
+        let bi = 0, bd = Infinity;
+        for (let i = 0; i < sorted.length; i++) {
+          const d = Math.abs(fitEval(fit, sorted[i].pos) - target);
+          if (d < bd) { bd = d; bi = i; }
+        }
+        picks.push(sorted[bi]);
+      }
+    } else {
+      for (let k = 0; k < N; k++) picks.push(sorted[Math.round((sorted.length - 1) * k / (N - 1))]);
+    }
+
+    const seen = new Set();
+    this.points = [];
+    for (const s of picks) {
+      const rawVal = useFitted ? fitEval(fit, s.pos) : s.raw;
+      const key = rawVal.toFixed(2);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      this.points.push({ pos: s.pos, raw: rawVal, torque: torqueAt(s.pos), measured: !useFitted });
+    }
+    this.points.sort((a, b) => a.raw - b.raw);
+
+    this.renderTable();
+    this.draw();
+  },
+
+  renderTable() {
+    const tb = $("calTable").tBodies[0];
+    tb.textContent = "";
+    this.points.forEach((p, i) => {
+      const tr = document.createElement("tr");
+      const cells = [String(i), p.raw.toFixed(2), p.torque.toFixed(4)];
+      cells.forEach(t => { const td = document.createElement("td"); td.textContent = t; tr.appendChild(td); });
+      const td = document.createElement("td");
+      const b = document.createElement("button");
+      b.className = "btn send"; b.textContent = "Send";
+      b.addEventListener("click", () => send(p.raw.toFixed(2) + ";" + p.torque.toFixed(4)));
+      td.appendChild(b); tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+    $("calSendAll").disabled = this.points.length === 0;
+  },
+
+  uploadBlock() {
+    return ["cal upload 0"]
+      .concat(this.points.map(p => p.raw.toFixed(2) + ";" + p.torque.toFixed(4)))
+      .concat(["END"]).join("\n");
+  },
+
+  firmwareArrays() {
+    const r = this.points.map(p => p.raw.toFixed(2)).join(", ");
+    const w = this.points.map(p => p.torque.toFixed(4)).join(", ");
+    return "const float rP[] = {" + r + "};\nconst float wP[] = {" + w + "};\n" +
+           "const uint8_t nP = " + this.points.length + ";";
+  },
+
+  async sendAll() {
+    if (!this.points.length) return;
+    if (!confirm("Send " + this.points.length + " calibration points to the fixture?\n\n" +
+                 "This replaces the table from slot 0. Follow with 'save' to commit to NVS.")) return;
+    await send("cal upload 0");
+    for (const p of this.points) {
+      await new Promise(r => setTimeout(r, 40));
+      await send(p.raw.toFixed(2) + ";" + p.torque.toFixed(4));
+    }
+    await new Promise(r => setTimeout(r, 40));
+    await send("END");
+    setStatus("Cal points sent. Check the fixture response, then send 'save'.");
+  },
+
+  draw() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, r = this.cv.getBoundingClientRect();
+    const W = r.width, H = r.height;
+    if (!W || !H) return;
+    ctx.clearRect(0, 0, W, H);
+
+    const padL = 62, padR = 14, padT = 14, padB = 26;
+    const gap = 10, resH = Math.min(74, H * 0.3);
+    const mainH = H - resH - gap - padT - padB;
+
+    if (!this.samples.length) {
+      ctx.fillStyle = "#4c5b57"; ctx.font = "11px ui-monospace, monospace";
+      ctx.fillText("No sweep captured. tare → lc raw on → Start capture → run the sweep.", padL, H / 2);
+      return;
+    }
+
+    const pos = this.samples.map(s => s.pos), raw = this.samples.map(s => s.raw);
+    const pMin = Math.min.apply(null, pos), pMax = Math.max.apply(null, pos);
+    const scaleRaw = (this.fit && this.fit.kept)
+      ? raw.filter((_, i) => this.fit.kept[i])
+      : raw;
+    const scaleSrc = scaleRaw.length ? scaleRaw : raw;
+    let rMin = Math.min.apply(null, scaleSrc), rMax = Math.max.apply(null, scaleSrc);
+    if (rMin === rMax) { rMin -= 1; rMax += 1; }
+    const span = (a, b) => (b - a) || 1;
+    const X = p => padL + (p - pMin) / span(pMin, pMax) * (W - padL - padR);
+    const Y = v => padT + mainH - (v - rMin) / span(rMin, rMax) * mainH;
+
+    // grid
+    ctx.strokeStyle = "#1e2a27"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= 4; i++) { const y = padT + mainH * i / 4; ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); }
+    ctx.stroke();
+    ctx.fillStyle = "#5d6f69"; ctx.font = "10px ui-monospace, monospace"; ctx.textAlign = "right";
+    for (let i = 0; i <= 4; i++) {
+      const v = rMax - (rMax - rMin) * i / 4;
+      ctx.fillText(Math.round(v).toLocaleString(), padL - 6, padT + mainH * i / 4 + 3);
+    }
+    ctx.textAlign = "left";
+    ctx.fillText(pMin + " steps", padL, H - 8);
+    ctx.textAlign = "right";
+    ctx.fillText(pMax + " steps", W - padR, H - 8);
+    ctx.textAlign = "left";
+
+    // samples
+    for (let i = 0; i < this.samples.length; i++) {
+      const rejected = this.fit && !this.fit.kept[i];
+      ctx.fillStyle = rejected ? "#d8482c88" : "#6f8f86";
+      ctx.fillRect(X(pos[i]) - 1, Y(raw[i]) - 1, 2, 2);
+    }
+
+    // fitted curve
+    if (this.fit) {
+      ctx.strokeStyle = "#f0a71c"; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let k = 0; k <= 400; k++) {
+        const p = pMin + (pMax - pMin) * k / 400;
+        const y = Y(fitEval(this.fit, p));
+        k ? ctx.lineTo(X(p), y) : ctx.moveTo(X(p), y);
+      }
+      ctx.stroke();
+    }
+
+    // chosen points
+    ctx.strokeStyle = "#5fd0b4"; ctx.lineWidth = 1.2;
+    for (const p of this.points) {
+      const x = X(p.pos), y = Y(p.raw);
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, 6.2832); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(x - 5, y);
+      ctx.setLineDash([2, 3]); ctx.globalAlpha = .35; ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
+
+    // residual strip
+    if (this.fit) {
+      const top = padT + mainH + gap;
+      const res = this.fit.residuals;
+      const lim = Math.max.apply(null, res.map(Math.abs)) || 1;
+      const RY = v => top + resH / 2 - (v / lim) * (resH / 2 - 3);
+      ctx.strokeStyle = "#243230"; ctx.beginPath();
+      ctx.moveTo(padL, RY(0)); ctx.lineTo(W - padR, RY(0)); ctx.stroke();
+      for (let i = 0; i < res.length; i++) {
+        ctx.fillStyle = this.fit.kept[i] ? "#6f8f86" : "#d8482c88";
+        ctx.fillRect(X(pos[i]) - 1, RY(res[i]) - 1, 2, 2);
+      }
+      ctx.fillStyle = "#5d6f69"; ctx.font = "9.5px ui-monospace, monospace"; ctx.textAlign = "right";
+      ctx.fillText("±" + Math.round(lim), padL - 6, top + 10);
+      ctx.textAlign = "left";
+      ctx.fillText("residuals", padL + 4, top + 10);
+    }
+  }
+};
+
+/* ============================================================
+   Runs
+   ============================================================ */
+const Runs = {
+  dir: null,
+  seq: [], seqExpected: null, fetching: false, fetchTimer: null,
+  data: [], capturing: false, startedAt: null, endedAt: null,
+  id: null, cv: null, ctx: null,
+
+  init() {
+    this.cv = $("runPlot");
+    this.ctx = this.cv.getContext("2d");
+    this.resize();
+  },
+
+  resize() {
+    if (!this.cv) return;
+    const r = this.cv.getBoundingClientRect();
+    if (!r.width) return;
+    const dpr = window.devicePixelRatio || 1;
+    this.cv.width = Math.round(r.width * dpr);
+    this.cv.height = Math.round(r.height * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.draw();
+  },
+
+  note(msg, warn) {
+    const el = $("runNote");
+    el.textContent = msg || "";
+    el.classList.toggle("hidden", !msg);
+    el.classList.toggle("warn", !!warn);
+  },
+
+  feed(line, parsed, now) {
+    // --- sequence fetch ---
+    if (this.fetching) {
+      const m = line.match(/^\[SEQ\]\s+(\d+)\s+step/);
+      if (m) {
+        this.seqExpected = +m[1];
+        this.seq = [];
+        if (this.seqExpected === 0) this.finishFetch();
+        return;
+      }
+      if (this.seqExpected !== null && line.trim() && !/^\[SEQ\]/.test(line.trim())) {
+        this.seq.push(line.replace(/\s+$/, ""));
+        $("runSeqView").textContent = this.seq.join("\n");
+        if (this.seq.length >= this.seqExpected) this.finishFetch();
+        return;
+      }
+    }
+
+    // --- run capture ---
+    if (!this.capturing) return;
+    if (line.indexOf("All cycles complete") >= 0) {
+      this.stop();
+      this.note("Fixture reported all cycles complete — capture stopped automatically.");
+      return;
+    }
+    if (parsed && (parsed.kind === "data" || parsed.kind === "live" || parsed.kind === "buf") &&
+        Number.isFinite(parsed.pos) && Number.isFinite(parsed.force)) {
+      this.data.push({
+        iso: now.toISOString(),
+        cycle: Number.isFinite(parsed.cycle) ? parsed.cycle : "",
+        t: Number.isFinite(parsed.t) ? parsed.t : "",
+        pos: parsed.pos,
+        force: parsed.force
+      });
+      $("runSamples").textContent = this.data.length;
+      if (this.data.length % 20 === 0) this.draw();
+    }
+  },
+
+  async fetchSeq() {
+    if (!S.connected) { this.note("Connect to the fixture first.", true); return; }
+    this.fetching = true; this.seq = []; this.seqExpected = null;
+    $("runSeqView").textContent = "Fetching…";
+    this.note("");
+    await send("mode setup");
+    await new Promise(r => setTimeout(r, 200));
+    await send("list seq");
+    clearTimeout(this.fetchTimer);
+    this.fetchTimer = setTimeout(() => {
+      if (this.fetching) {
+        this.fetching = false;
+        if (this.seq.length) this.finishFetch(true);
+        else { $("runSeqView").textContent = "No sequence returned."; this.note("The fixture did not answer 'list seq' in 3 s.", true); }
+      }
+    }, 3000);
+  },
+
+  finishFetch(partial) {
+    this.fetching = false;
+    clearTimeout(this.fetchTimer);
+    $("runSeqCount").textContent = this.seq.length + (partial ? " (timed out)" : "");
+    $("runSeqView").textContent = this.seq.join("\n") || "(empty sequence)";
+    $("runStart").disabled = false;
+    setStatus("Sequence loaded: " + this.seq.length + " steps.");
+  },
+
+  async start() {
+    if (!S.connected) { this.note("Connect first.", true); return; }
+    const n = Math.max(1, +$("runCycles").value || 1);
+    if (!$("runResetFirst").checked && Device.cycDone !== null && Device.cycDone >= n) {
+      this.note("Fixture is already at " + Device.cycDone + " / " + n +
+                ". Check “Reset cycles before start”, or raise the target.", true);
+      return;
+    }
+    this.data = []; this.endedAt = null;
+    this.capturing = true;
+    this.startedAt = new Date();
+    this.id = null;
+    $("runSamples").textContent = "0";
+    $("runId").textContent = "—";
+    $("runStop").disabled = false;
+    $("runSave").disabled = true;
+    $("runStart").disabled = true;
+    this.note("");
+    await send("mode live");
+    await sleep(200);
+    if ($("runResetFirst").checked) {
+      await send("cycles reset");
+      await sleep(150);
+    }
+    await send(this.startCmd());
+    setStatus("Run started — buffering data. Target is absolute (completed / " + n + ").");
+    this.draw();
+  },
+
+  startCmd() {
+    const n = Math.max(1, +$("runCycles").value || 1);
+    const prof = $("runLcProfile").value;
+    if (prof === "every") return "start " + n + " LC every " + Math.max(1, +$("runLcEvery").value || 1);
+    if (prof === "list") {
+      const list = $("runLcList").value.trim();
+      return list ? "start " + n + " LC cycles " + list : "start " + n;
+    }
+    return "start " + n;
+  },
+
+  async resetCycles() {
+    if (!S.connected) { this.note("Connect first.", true); return; }
+    if (!confirm("Reset completed cycle count to 0 on the fixture?\nThe target is kept and saved to NVS.\nA running test will be stopped.")) return;
+    await send("mode live");
+    await sleep(150);
+    await send("cycles reset");
+    this.note("Cycle count reset to 0. Target unchanged.");
+  },
+
+  stop() {
+    if (!this.capturing) return;
+    this.capturing = false;
+    this.endedAt = new Date();
+    $("runStop").disabled = true;
+    $("runStart").disabled = false;
+    $("runSave").disabled = this.data.length === 0;
+    const secs = (this.endedAt - this.startedAt) / 1000;
+    $("runDur").textContent = secs.toFixed(1) + " s";
+    const cyc = new Set(this.data.map(d => d.cycle).filter(c => c !== ""));
+    $("runCyclesSeen").textContent = cyc.size || "—";
+    setStatus("Capture stopped: " + this.data.length + " samples over " + secs.toFixed(1) + " s.");
+    this.draw();
+  },
+
+  nextId() {
+    const d = new Date(), p = n => String(n).padStart(2, "0");
+    const day = d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
+    const key = "runseq." + day;
+    const n = (+store.get(key, "0") || 0) + 1;
+    store.set(key, String(n));
+    return day + "-" + String(n).padStart(3, "0");
+  },
+
+  async pickDir() {
+    if (typeof window.showDirectoryPicker !== "function") {
+      this.note("This browser can't write folders. Save run will download instead.", true);
+      return;
+    }
+    try {
+      this.dir = await window.showDirectoryPicker({ mode: "readwrite", id: "fixture-runs" });
+      $("runDirPath").textContent = "Runs folder: " + this.dir.name;
+    } catch (e) { if (e.name !== "AbortError") this.note("Folder not opened: " + e.message, true); }
+  },
+
+  async save() {
+    if (!this.data.length) return;
+    this.id = this.nextId();
+    $("runId").textContent = this.id;
+
+    const meta = [
+      ["run_id", this.id],
+      ["notes", $("runNotes").value || ""],
+      ["started", this.startedAt ? this.startedAt.toISOString() : ""],
+      ["ended", this.endedAt ? this.endedAt.toISOString() : ""],
+      ["cycles_requested", Math.max(1, +$("runCycles").value || 1)],
+      ["samples", this.data.length],
+      ["sequence_steps", this.seq.length],
+      [],
+      ["pc_time_iso", "cycle", "device_timestamp", "position", "force"]
+    ];
+    const rows = meta.concat(this.data.map(d => [d.iso, d.cycle, d.t, d.pos, d.force]));
+    const seqRows = [["step"]].concat(this.seq.map(s => [s]));
+
+    const bytes = buildXlsx([
+      { name: this.id, rows: rows },
+      { name: this.id + "-seq", rows: seqRows }
+    ]);
+    const fname = "run_" + this.id + ".xlsx";
+
+    if (this.dir) {
+      try {
+        const h = await this.dir.getFileHandle(fname, { create: true });
+        const w = await h.createWritable();
+        await w.write(bytes);
+        await w.close();
+        setStatus("Saved " + fname + " to " + this.dir.name);
+        this.note("Saved " + fname);
+      } catch (e) {
+        setStatus("Save failed: " + e.message, true);
+        return;
+      }
+    } else {
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+      const a = document.createElement("a"); a.href = url; a.download = fname; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      setStatus("Downloaded " + fname);
+    }
+    $("runSave").disabled = true;
+  },
+
+  draw() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, r = this.cv.getBoundingClientRect();
+    const W = r.width, H = r.height;
+    if (!W || !H) return;
+    ctx.clearRect(0, 0, W, H);
+    const padL = 62, padR = 14, padT = 14, padB = 28;
+
+    if (!this.data.length) {
+      ctx.fillStyle = "#4c5b57"; ctx.font = "11px ui-monospace, monospace";
+      ctx.fillText("No run captured. Fetch sequence, then Start run.", padL, H / 2);
+      return;
+    }
+
+    const pos = this.data.map(d => Device.dispPos(d.pos)), force = this.data.map(d => Device.dispForce(d.force));
+    const pMin = Math.min.apply(null, pos), pMax = Math.max.apply(null, pos);
+    let fMin = Math.min.apply(null, force), fMax = Math.max.apply(null, force);
+    if (fMin === fMax) { fMin -= 1; fMax += 1; }
+    const span = (a, b) => (b - a) || 1;
+    const X = p => padL + (p - pMin) / span(pMin, pMax) * (W - padL - padR);
+    const Y = v => padT + (H - padT - padB) - (v - fMin) / span(fMin, fMax) * (H - padT - padB);
+
+    ctx.strokeStyle = "#1e2a27"; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i = 0; i <= 4; i++) { const y = padT + (H - padT - padB) * i / 4; ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); }
+    ctx.stroke();
+
+    ctx.fillStyle = "#5d6f69"; ctx.font = "10px ui-monospace, monospace"; ctx.textAlign = "right";
+    for (let i = 0; i <= 4; i++) {
+      const v = fMax - (fMax - fMin) * i / 4;
+      ctx.fillText(v.toFixed(2), padL - 6, padT + (H - padT - padB) * i / 4 + 3);
+    }
+    ctx.textAlign = "left"; ctx.fillText("position " + pMin + " … " + pMax + " steps (absolute)", padL, H - 9);
+
+    // colour by cycle so drift between cycles is visible
+    const cycles = Array.from(new Set(this.data.map(d => d.cycle)));
+    for (let i = 0; i < this.data.length; i++) {
+      const d = this.data[i];
+      const ci = cycles.indexOf(d.cycle);
+      const hue = cycles.length > 1 ? 40 + (ci / cycles.length) * 130 : 40;
+      ctx.fillStyle = "hsla(" + hue + ",78%,58%,.75)";
+      ctx.fillRect(X(Device.dispPos(d.pos)) - 1.2, Y(Device.dispForce(d.force)) - 1.2, 2.4, 2.4);
+    }
+  }
+};
+
+/* ---- cal + run wiring ---- */
+$("calStart").addEventListener("click", () => CalSweep.start());
+$("calStop").addEventListener("click", () => CalSweep.stop());
+$("calProcess").addEventListener("click", () => CalSweep.process());
+$("calClear").addEventListener("click", () => CalSweep.clear());
+$("calSendAll").addEventListener("click", () => CalSweep.sendAll());
+["calSource", "calSpacing", "calN", "calRefine", "calRobust", "calPrefilter", "calMaxTorque", "calSpr"].forEach(id => {
+  $(id).addEventListener("change", () => { if (CalSweep.fit) CalSweep.process(); });
+});
+$("calCopyBlock").addEventListener("click", async () => {
+  if (!CalSweep.points.length) return;
+  try { await navigator.clipboard.writeText(CalSweep.uploadBlock()); setStatus("Upload block copied."); }
+  catch (e) { setStatus("Clipboard blocked by the browser.", true); }
+});
+$("calCopyArrays").addEventListener("click", async () => {
+  if (!CalSweep.points.length) return;
+  try { await navigator.clipboard.writeText(CalSweep.firmwareArrays()); setStatus("Firmware arrays copied."); }
+  catch (e) { setStatus("Clipboard blocked by the browser.", true); }
+});
+$("calDownload").addEventListener("click", () => {
+  if (!CalSweep.samples.length) return;
+  const fit = CalSweep.fit;
+  const head = "pos,raw" + (fit ? ",fitted,residual,kept" : "");
+  const body = CalSweep.samples.map((s, i) => {
+    let row = s.pos + "," + s.raw;
+    if (fit) row += "," + fitEval(fit, s.pos).toFixed(2) + "," + fit.residuals[i].toFixed(2) + "," + (fit.kept[i] ? 1 : 0);
+    return row;
+  });
+  download("cal_sweep_" + FileLog.today() + ".csv", [head].concat(body).join("\r\n"), "text/csv");
+});
+
+$("runFetchSeq").addEventListener("click", () => Runs.fetchSeq());
+$("runStart").addEventListener("click", () => Runs.start());
+$("runStop").addEventListener("click", () => Runs.stop());
+$("runSave").addEventListener("click", () => Runs.save());
+$("runPickDir").addEventListener("click", () => Runs.pickDir());
+$("runResetCyc").addEventListener("click", () => Runs.resetCycles());
+$("runPause").addEventListener("click", () => send("pause"));
+$("runResume").addEventListener("click", () => send("resume"));
+
+$("calTare").addEventListener("click", async () => {
+  await send("mode fixture");
+  await sleep(150);
+  await send("tare");
+  await send("lc raw on");
+});
+$("calAddPoint").addEventListener("click", async () => {
+  await send("mode fixture");
+  await sleep(150);
+  await send("cal weight " + ($("calKnownWeight").value.trim() || "0"));
+});
+$("calLoadSweepSeq").addEventListener("click", async () => {
+  if (!S.connected) { setStatus("Connect first.", true); return; }
+  const lines = [
+    "mode setup",
+    "set lc_limits 0",
+    "clear seq",
+    "G0 X-1000 F20 A1000 LC RT80",
+    "G4 P5000",
+    "G0 X0 F20 A1000 LC RT80",
+    "G4 P5000"
+  ];
+  for (const line of lines) {
+    await send(line);
+    await sleep(40);
+  }
+  await send("save seq");
+  setStatus("Sweep sequence loaded. Tare, start capture, then Start 1 cycle.");
+});
+$("calStart1").addEventListener("click", async () => {
+  await send("mode live");
+  await sleep(150);
+  if (Device.cycDone !== null && Device.cycDone >= 1) await send("cycles reset");
+  await send("start 1");
+});
+
+window.addEventListener("resize", () => { CalSweep.resize(); Runs.resize(); });
+CalSweep.init();
+Runs.init();
+
+sizeCanvas();
+setStatus("Ready. Press Connect and pick the fixture's COM port.");
+</script>
+</body>
+</html>
