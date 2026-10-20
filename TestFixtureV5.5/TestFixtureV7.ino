@@ -7,7 +7,7 @@
  *      + V5.2 (typed P/D/R/S LINK_UART protocol consumed by the display ESP32)
  *
  * LINK_UART protocol (to display ESP32 — see main.cpp handleCommand):
- *   "P pos=<n>"            — Position update (jog done, setpos home)
+ *   "P pos=<n>"            — Position update (jog done, setpos home, get pos)
  *   "D pos=<n> lc=<f>"     — Data point during in-motion LC sampling
  *   "R pos=<n> lc=<f>"     — Result from a stationary LC read (M100 / read lc)
  *   "S <state>"            — State change: ready | paused | complete
@@ -23,11 +23,14 @@
  *
  * Modes:
  *   SETUP       — Define test sequence via G-code, configure hardware settings
- *   ADJUSTMENTS — Jog motor, set named positions (XA/XB/XC/XD), calibrate LC
+ *   FIXTURE     — Load-cell calibration and fixture bring-up (cal, zero offset)
+ *   ADJUSTMENTS — Jog motor, set named positions (XA/XB/XC/XD/XE), servo / break-beam
  *   LIVE_TEST   — Execute test cycles (start / pause / resume / stop / status)
  *
+ * Global in any mode: read lc | read lc raw | get pos | lc | zero | zero clear
+ *
  * G-code format (SETUP mode):
- *   G0 X<steps|XA..XD> [F<speed>] [A<accel>]
+ *   G0 X<steps|XA..XE> [F<speed>] [A<accel>]
  *      [LC [R<samples>] [RT<ms>] [P<s1,s2,...>] [L<0|1>]]
  *                                               — Move, with optional in-motion LC
  *   G4 P<ms>                                   — Dwell / wait
@@ -42,9 +45,10 @@
  *   L1           — pause test immediately if a reading exceeds limits
  *
  * Cycle-profile mode (LIVE_TEST):
- *   start 10                    — run 10 cycles; LC behaviour defined per G0 step
+ *   start 10                    — absolute target: run until completed cycles reach 10
  *   start 10 LC every 3         — full LC logging only on cycles 3,6,9; others check limits only
  *   start 10 LC cycles 1,5,10   — full LC logging only on those specific cycles
+ *   cycles / cycles reset       — show or clear completed count (target kept; persisted in NVS)
  *
  *   M101 — Seek to target force (PI+D velocity loop, sequence step)
  *
@@ -58,6 +62,8 @@
 #include <HX711_MP.h>
 #include <Preferences.h>
 #include <string.h>
+#include <stddef.h>
+#include <math.h>
 #include "fixture_hal.h"
 
 // ============================================================================
@@ -101,24 +107,29 @@ static const uint8_t  SERVO_LEDC_CHANNEL  = 0;   // used only on Arduino-ESP32 v
 
 #define MAX_TEST_STEPS      128   // Max G-code steps per sequence
 #define LC_INDEX_SIZE       10    // HX711_MP multipoint calibration slots
-#define NUM_NAMED_POS        4    // XA, XB, XC, XD
+#define NUM_NAMED_POS        5    // XA, XB, XC, XD, XE
 #define NUM_NAMED_SERVO_POS  4    // SA, SB, SC, SD
 #define MAX_LC_POSITIONS    16    // Max position-trigger points per G0 step
 #define MAX_PROFILE_CYCLES  32    // Max entries in explicit cycle list
 
 #define NVS_MAGIC        0xC0BEEF02u
-#define NVS_VERSION      6u          // bumped: added analog break-beam mode/threshold/hysteresis
+#define NVS_VERSION      7u          // bumped: added named position XE
 #define SEQ_MAGIC        0x5E900006u // bumped: added IF/FOR/WHILE control flow
 
 #define LC_RING_CAP      512
 #define SEQ_NVS_KEY_HDR  "seq_hdr"
 #define SEQ_NVS_KEY_DATA "seq_data"
+#define CYC_NVS_KEY_DONE "cyc_done"
+#define CYC_NVS_KEY_GOAL "cyc_goal"
+#define LC_NVS_KEY_ZERO    "lc_zoff"   // display zero offset (separate from cal matrix)
+#define LC_NVS_KEY_PRESET  "lc_pset"   // user-saved cal restore snapshot
+#define LC_PRESET_MAGIC    0x50534554u // 'PSET'
 
 // ============================================================================
 // ENUMS
 // ============================================================================
 
-enum class Mode     : uint8_t { SETUP=0, ADJUSTMENTS=1, LIVE_TEST=2 };
+enum class Mode     : uint8_t { SETUP=0, ADJUSTMENTS=1, LIVE_TEST=2, FIXTURE=3 };
 enum class RunState : uint8_t { IDLE=0, RUNNING=1, PAUSED=2, COMPLETE=3 };
 enum class StepType : uint8_t {
   MOVE=0, DWELL=1, READ_LC=2, SEEK_FORCE=3, PAUSE=4,
@@ -184,7 +195,7 @@ struct TestStep {
 
   // --- MOVE ---
   bool    useNamedPos;
-  uint8_t posVarIdx;          // 0=XA, 1=XB, 2=XC, 3=XD
+  uint8_t posVarIdx;          // 0=XA, 1=XB, 2=XC, 3=XD, 4=XE
   long    targetSteps;
   float   speed;              // 0 = use cfg default
   float   accel;              // 0 = use cfg default
@@ -265,7 +276,7 @@ struct TestStep {
 
 /*
  * Persistent configuration.
- * NVS_VERSION was bumped — old saved data will be rejected and defaults used.
+ * NVS_VERSION 7 added XE; v6 configs are migrated (XA..XD + cal kept, XE unset).
  */
 struct Config {
   // Stepper
@@ -329,9 +340,9 @@ struct Config {
   uint16_t break1Hyst = 150;         // ANALOG +/- hysteresis band
   uint16_t break2Hyst = 150;
 
-  // Named positions (XA..XD)
-  long namedPositions[NUM_NAMED_POS] = {0, 0, 0, 0};
-  bool namedPosSet   [NUM_NAMED_POS] = {false, false, false, false};
+  // Named positions (XA..XE)
+  long namedPositions[NUM_NAMED_POS] = {0, 0, 0, 0, 0};
+  bool namedPosSet   [NUM_NAMED_POS] = {false, false, false, false, false};
 
   // Load cell calibration matrix
   float lc_calRaw   [LC_INDEX_SIZE] = {};
@@ -454,6 +465,10 @@ TaskHandle_t taskLcSampleHandle = nullptr;
 Preferences prefs;
 volatile bool inUploadMode = false;
 volatile bool g_lcRawMode = false;  // true = stream raw ADC counts, false = calibrated units
+// Subtracted from calibrated get_units() results. Does NOT touch the multipoint
+// cal matrix — use this when fixturing adds/removes dead weight. Cleared by
+// 'zero clear' / wipe; persisted under LC_NVS_KEY_ZERO.
+volatile float g_lcZeroOffset = 0.0f;
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -491,6 +506,7 @@ const char* modeStr(Mode m) {
     case Mode::SETUP:       return "SETUP";
     case Mode::ADJUSTMENTS: return "ADJUSTMENTS";
     case Mode::LIVE_TEST:   return "LIVE_TEST";
+    case Mode::FIXTURE:     return "FIXTURE";
   }
   return "?";
 }
@@ -549,13 +565,46 @@ bool loadConfig() {
   prefs.begin("fixture", true);
   NvsHeader h;
   size_t n = prefs.getBytes("hdr", &h, sizeof(h));
-  bool ok = (n == sizeof(h) && h.magic == NVS_MAGIC &&
-             h.version == NVS_VERSION && h.length == sizeof(Config));
-  if (!ok) { prefs.end(); return false; }
+  if (n != sizeof(h) || h.magic != NVS_MAGIC) { prefs.end(); return false; }
+
   Config tmp;
-  n = prefs.getBytes("cfg", &tmp, sizeof(tmp));
-  prefs.end();
-  if (n != sizeof(tmp)) return false;
+
+  if (h.version == NVS_VERSION && h.length == sizeof(Config)) {
+    n = prefs.getBytes("cfg", &tmp, sizeof(tmp));
+    prefs.end();
+    if (n != sizeof(tmp)) return false;
+  } else if (h.version == 6) {
+    // v6 had XA..XD only (4 slots). namedPositions/namedPosSet grew for XE;
+    // everything before namedPositions and everything from lc_calRaw onward
+    // is the same layout.
+    if (h.length > 2048) { prefs.end(); return false; }
+    uint8_t raw[2048];
+    n = prefs.getBytes("cfg", raw, h.length);
+    prefs.end();
+    if (n != h.length) return false;
+
+    const size_t pre = offsetof(Config, namedPositions);
+    if (h.length < pre) return false;
+    memcpy(&tmp, raw, pre);
+
+    const size_t oldNamedBytes = 4 * sizeof(long) + 4 * sizeof(bool);  // 20, no pad before lc_cal
+    memcpy(tmp.namedPositions, raw + pre, 4 * sizeof(long));
+    memcpy(tmp.namedPosSet, raw + pre + 4 * sizeof(long), 4);
+    tmp.namedPositions[4] = 0;
+    tmp.namedPosSet[4] = false;
+
+    const size_t oldCal = pre + oldNamedBytes;
+    const size_t newCal = offsetof(Config, lc_calRaw);
+    if (h.length < oldCal) return false;
+    size_t restOld = h.length - oldCal;
+    size_t restNew = sizeof(Config) - newCal;
+    size_t rest = (restOld < restNew) ? restOld : restNew;
+    memcpy((uint8_t*)&tmp + newCal, raw + oldCal, rest);
+  } else {
+    prefs.end();
+    return false;
+  }
+
   lockCfg();
   cfg = tmp;
   stepper.setMaxSpeed(cfg.maxSpeed_sps);
@@ -567,6 +616,7 @@ bool loadConfig() {
 bool wipeConfig() {
   prefs.begin("fixture", false);
   bool ok = prefs.remove("hdr") && prefs.remove("cfg");
+  prefs.remove(LC_NVS_KEY_PRESET);
   prefs.end();
   return ok;
 }
@@ -622,6 +672,77 @@ bool wipeSequence() {
 }
 
 // ============================================================================
+// PERSISTENT STORAGE — Cycle progress (separate keys; written every completed cycle)
+// ============================================================================
+
+bool saveCycleProgress() {
+  prefs.begin("fixture", false);
+  bool ok = (prefs.putInt(CYC_NVS_KEY_DONE, (int32_t)cyclesDone) > 0) &&
+            (prefs.putInt(CYC_NVS_KEY_GOAL, (int32_t)cyclesGoal) > 0);
+  prefs.end();
+  return ok;
+}
+
+bool loadCycleProgress() {
+  prefs.begin("fixture", true);
+  // Missing keys → leave defaults (done=0, goal=1)
+  if (!prefs.isKey(CYC_NVS_KEY_DONE) && !prefs.isKey(CYC_NVS_KEY_GOAL)) {
+    prefs.end();
+    return false;
+  }
+  int32_t done = prefs.getInt(CYC_NVS_KEY_DONE, 0);
+  int32_t goal = prefs.getInt(CYC_NVS_KEY_GOAL, 1);
+  prefs.end();
+  if (done < 0) done = 0;
+  if (goal < 1) goal = 1;
+  cyclesDone = done;
+  cyclesGoal = goal;
+  return true;
+}
+
+bool wipeCycleProgress() {
+  prefs.begin("fixture", false);
+  // remove() returns false if key was already absent — treat that as OK
+  prefs.remove(CYC_NVS_KEY_DONE);
+  prefs.remove(CYC_NVS_KEY_GOAL);
+  prefs.end();
+  cyclesDone = 0;
+  cyclesGoal = 1;
+  return true;
+}
+
+void reportCycleProgress() {
+  LINK_UART.printf("R cyc=%d/%d \n", cyclesDone, cyclesGoal);
+}
+
+bool saveLcZeroOffset() {
+  prefs.begin("fixture", false);
+  bool ok = prefs.putFloat(LC_NVS_KEY_ZERO, (float)g_lcZeroOffset) > 0;
+  prefs.end();
+  return ok;
+}
+
+bool loadLcZeroOffset() {
+  prefs.begin("fixture", true);
+  if (!prefs.isKey(LC_NVS_KEY_ZERO)) {
+    prefs.end();
+    g_lcZeroOffset = 0.0f;
+    return false;
+  }
+  g_lcZeroOffset = prefs.getFloat(LC_NVS_KEY_ZERO, 0.0f);
+  prefs.end();
+  return true;
+}
+
+bool wipeLcZeroOffset() {
+  prefs.begin("fixture", false);
+  prefs.remove(LC_NVS_KEY_ZERO);
+  prefs.end();
+  g_lcZeroOffset = 0.0f;
+  return true;
+}
+
+// ============================================================================
 // LOAD CELL  (HX711_MP multipoint calibration)
 // ============================================================================
 
@@ -637,17 +758,77 @@ void lc_printMatrix() {
   if (!any) Serial.println(F("  (empty)"));
 }
 
+void printLcSettings() {
+  lockCfg();
+  int nPts = 0;
+  for (int i = 0; i < LC_INDEX_SIZE; i++) if (cfg.lc_calUsed[i]) nPts++;
+
+  Serial.println(F("---- LOAD CELL ----"));
+  Serial.printf("Limits: %s  [%.3f .. %.3f]\n",
+                cfg.lc_limitsOn ? "ON" : "off", cfg.lc_lowerLimit, cfg.lc_upperLimit);
+  Serial.printf("Known weight (default cal): %.3f\n", cfg.lc_knownWeight);
+  Serial.printf("In-motion defaults: R=%d  RT=%lu ms\n",
+                cfg.lc_inMotionSamples, (unsigned long)cfg.lc_inMotionRateMs);
+  Serial.printf("Ring: %s  thresh=%u  sampler=%u ms\n",
+                cfg.lc_ring_enable ? "ON" : "off",
+                (unsigned)cfg.lc_ring_flush_thresh, (unsigned)cfg.lc_sampler_period_ms);
+  Serial.printf("Stream mode: %s\n", g_lcRawMode ? "RAW ADC" : "calibrated units");
+  Serial.printf("Zero offset: %.4f  (display = cal_units - offset)\n", (float)g_lcZeroOffset);
+  Serial.printf("Cal points used: %d / %d\n", nPts, LC_INDEX_SIZE);
+  unlockCfg();
+  lc_printMatrix();
+}
+
 void lc_applyCalibration() {
+  // HX711_MP::_multiMap requires increasing raw values by index.
+  // Our UI/presets often store tension→compression (descending raw); apply sorted.
+  struct CalPt { float raw; float weight; };
+  CalPt pts[LC_INDEX_SIZE];
   int n = 0;
+  for (int i = 0; i < LC_INDEX_SIZE; i++) {
+    if (!cfg.lc_calUsed[i]) continue;
+    pts[n].raw    = cfg.lc_calRaw[i];
+    pts[n].weight = cfg.lc_calWeight[i];
+    n++;
+  }
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      if (pts[j].raw < pts[i].raw) {
+        CalPt tmp = pts[i];
+        pts[i] = pts[j];
+        pts[j] = tmp;
+      }
+    }
+  }
+  bool wasDescending = false;
+  if (n >= 2) {
+    // Detect original slot order vs sorted (informational)
+    int first = -1, last = -1;
+    for (int i = 0; i < LC_INDEX_SIZE; i++) if (cfg.lc_calUsed[i]) { first = i; break; }
+    for (int i = LC_INDEX_SIZE - 1; i >= 0; i--) if (cfg.lc_calUsed[i]) { last = i; break; }
+    if (first >= 0 && last > first && cfg.lc_calRaw[first] > cfg.lc_calRaw[last])
+      wasDescending = true;
+  }
+
   if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
   for (int i = 0; i < LC_INDEX_SIZE; i++) {
-    lc.setCalibrate(i, cfg.lc_calUsed[i] ? cfg.lc_calRaw[i] : 0,
-                       cfg.lc_calUsed[i] ? cfg.lc_calWeight[i] : 0);
-    if (cfg.lc_calUsed[i]) n++;
+    if (i < n) {
+      lc.setCalibrate(i, pts[i].raw, pts[i].weight);
+    } else if (n > 0) {
+      // Library always maps all SIZE slots — pad with last point.
+      lc.setCalibrate(i, pts[n - 1].raw, pts[n - 1].weight);
+    } else {
+      lc.setCalibrate(i, 0, 0);
+    }
   }
   if (lcMutex) xSemaphoreGive(lcMutex);
+
   if (n < 2) Serial.println(F("[LC] WARNING: need >= 2 calibration points!"));
-  else       Serial.printf("[LC] Applied %d calibration points.\n", n);
+  else {
+    Serial.printf("[LC] Applied %d calibration points", n);
+    if (wasDescending) Serial.print(F(" (sorted ascending by raw for HX711_MP)"));
+    Serial.println('.');
+  }
 }
 
 void lc_clearCalibration() {
@@ -659,7 +840,102 @@ void lc_clearCalibration() {
   if (lcMutex) xSemaphoreGive(lcMutex);
 }
 
+struct LcUserPreset {
+  uint32_t magic;
+  uint8_t  nUsed;
+  uint8_t  used[LC_INDEX_SIZE];
+  float    raw[LC_INDEX_SIZE];
+  float    weight[LC_INDEX_SIZE];
+};
+
+static int lc_countUsed() {
+  int n = 0;
+  for (int i = 0; i < LC_INDEX_SIZE; i++) if (cfg.lc_calUsed[i]) n++;
+  return n;
+}
+
+static void lc_loadFactoryPreset() {
+  // Compiled-in fallback when no user snapshot has been saved yet.
+  // Adam&ColtonsFixture
+  //const float rP[] = {-2573482.0f, -2078030.0f, -1583780.25f, -1078195.38f, -579271.81f, -470021.0f, -84843.4f, 417211.19f, 878947.81f, 1365239.5f};
+  //const float wP[] = {-20.18f, -15.17f, -10.17f, -5.06f, 0.0f, 1.1f, 5.1f, 10.25f, 15.0f, 20.0f};
+  
+  //Bead Chain Fixture
+      //const float rP[] = {-8303006.5f, -7855286.5f, -7412174.5f, -6825165.0f, -6419535.0f, -5652503.0f, -4728992.0f, -3666402.5f, -1453522.38f, 378626.19f};
+      //const float wP[] = {-7.2646f, -6.0046f, -4.9046f, -3.4146f, -2.4046f, -0.4246f, 1.8954f, 4.5954f, 10.3954f, 15.0954f};
+      //non-shifted value
+      //const float rP[] = {-8303006.5f, -7855286.5f, -7412174.5f, -6825165.0f, -6419535.0f, -5652503.0f, -4728992.0f, -3666402.5f, -1453522.38f, 378626.19f};
+      //const float wP[] = {-2.36f, -1.1f, 0.0f, 1.49f, 2.5f, 4.48f, 6.8f, 9.5f, 15.3f, 20.0f};
+      //Test Fixture #3
+      //const float rP[] = {4124987.25f, 3104767.75f, 2095127.25f, 1093436.38f, 94092.4f, -943296.81f, -1923616.25f, -2853963.25f, -3822159.25f, -4240236.81f};
+      //const float wP[] = {-20.19f, -15.08f, -10.02f, -5.0f, 0.0f, 5.25f, 10.3f, 15.0f, 20.0f, 22.0f};
+      
+  //Componant Cycler
+    //#1
+    const float rP[] = {-4240139.00, -3234790.00, -2317392.00, -1339838.00, -429511.00, 483614.00, 1447233.00, 2378143.00, 3279253.00, 4175790.00};
+    const float wP[] = {-9.9965, -7.7801, -5.5583, -3.3297, -1.1168, 1.1165, 3.3293, 5.5269, 7.7563, 9.9745};
+    const uint8_t nP = 10;  
+      // const float rP[] = {-2887882.7f, -2249287.11f, -1610691.52f, -225728.56f, -88169.16f, 49390.25f, 186949.65f, 1582286.41f, 2220882.0f, 2859477.58f};
+      // const float wP[] = {-163.84f, -127.424f, -91.024f, -11.872f, -3.952f, 3.952f, 11.872f, 91.024f, 127.424f, 163.84f};
+      
+    //const float rP[] = {-4410336.00, -3358417.00, -2388631.00, -1373128.00, -456846.00, 503644.00, 1437303.00, 2377611.00, 3348208.00, 4231761.00};
+    //const float wP[] = {-10.2056, -7.9416, -5.6714, -3.3927, -1.1284, 1.1567, 3.4196, 5.6951, 7.9595, 10.2395};
+  
+      // const float rP[] = {-2813803.75f, -2189222.25f, -1564640.75f, -940059.31f, -315477.81f,
+      //               309103.69f, 933685.19f, 1558266.75f, 2182848.25f, 2807429.75f};
+      // const float wP[] = {-160.32f, -124.64f, -89.12f, -53.44f, -17.76f,
+      //               17.76f, 53.44f, 89.12f, 124.64f, 160.32f};
+
+  lc_clearCalibration();
+  for (int i = 0; i < nP && i < LC_INDEX_SIZE; i++) {
+    cfg.lc_calRaw[i] = rP[i];
+    cfg.lc_calWeight[i] = wP[i];
+    cfg.lc_calUsed[i] = true;
+  }
+}
+
+static bool lc_userPresetLoad() {
+  LcUserPreset p;
+  prefs.begin("fixture", true);
+  size_t n = prefs.getBytes(LC_NVS_KEY_PRESET, &p, sizeof(p));
+  prefs.end();
+  if (n != sizeof(p) || p.magic != LC_PRESET_MAGIC || p.nUsed == 0) return false;
+  lc_clearCalibration();
+  for (int i = 0; i < LC_INDEX_SIZE; i++) {
+    if (!p.used[i]) continue;
+    cfg.lc_calRaw[i] = p.raw[i];
+    cfg.lc_calWeight[i] = p.weight[i];
+    cfg.lc_calUsed[i] = true;
+  }
+  return lc_countUsed() > 0;
+}
+
+static bool lc_userPresetSave() {
+  if (lc_countUsed() < 2) return false;
+  LcUserPreset p = {};
+  p.magic = LC_PRESET_MAGIC;
+  for (int i = 0; i < LC_INDEX_SIZE; i++) {
+    p.used[i] = cfg.lc_calUsed[i] ? 1 : 0;
+    p.raw[i] = cfg.lc_calRaw[i];
+    p.weight[i] = cfg.lc_calWeight[i];
+    if (p.used[i]) p.nUsed++;
+  }
+  prefs.begin("fixture", false);
+  bool ok = prefs.putBytes(LC_NVS_KEY_PRESET, &p, sizeof(p)) == sizeof(p);
+  prefs.end();
+  return ok;
+}
+
+static bool lc_userPresetForget() {
+  prefs.begin("fixture", false);
+  bool ok = prefs.remove(LC_NVS_KEY_PRESET);
+  prefs.end();
+  return ok;
+}
+
 void lc_tare() {
+  // Destructive: wipes multipoint cal and plants a single zero-raw point.
+  // Prefer 'zero' for fixture/dead-weight offsets that should keep the matrix.
   lc_clearCalibration();
   float raw;
   if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
@@ -667,18 +943,33 @@ void lc_tare() {
   cfg.lc_calRaw[0] = raw; cfg.lc_calWeight[0] = 0; cfg.lc_calUsed[0] = true;
   lc.setCalibrate(0, raw, 0);
   if (lcMutex) xSemaphoreGive(lcMutex);
-  Serial.printf("[LC] Tare: raw=%.2f -> 0.\n", raw);
+  Serial.printf("[LC] Tare: raw=%.2f -> 0.  (matrix wiped — use 'zero' to keep cal)\n", raw);
   lc_printMatrix();
 }
 
 void lc_addCalPoint(float knownWeight) {
   int slot = -1;
-  for (int i = 1; i < LC_INDEX_SIZE; i++) if (!cfg.lc_calUsed[i]) { slot = i; break; }
+  // Slot 0 may be used for an explicit weight-0 cal point (preferred over tare).
+  for (int i = 0; i < LC_INDEX_SIZE; i++) if (!cfg.lc_calUsed[i]) { slot = i; break; }
   if (slot < 0) { Serial.println(F("[LC] Matrix full!")); return; }
   float raw;
   if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
   raw = lc.read_average(5);
   if (lcMutex) xSemaphoreGive(lcMutex);
+  // ADC counts are typically |raw| >> 500. Tiny values usually mean someone
+  // pasted a calibrated weight into a raw field (breaks multipoint fit).
+  if (fabsf(raw) < 500.0f) {
+    Serial.printf("[LC] REJECTED point: raw=%.2f looks like a weight, not ADC. "
+                  "Use 'read lc raw' for the raw column.\n", raw);
+    return;
+  }
+  for (int i = 0; i < LC_INDEX_SIZE; i++) {
+    if (cfg.lc_calUsed[i] && fabsf(cfg.lc_calWeight[i] - knownWeight) < 0.0005f) {
+      Serial.printf("[LC] WARNING: weight %.3f already in slot %d — fit may be unstable.\n",
+                    knownWeight, i);
+      break;
+    }
+  }
   cfg.lc_calRaw[slot] = raw; cfg.lc_calWeight[slot] = knownWeight; cfg.lc_calUsed[slot] = true;
   Serial.printf("[LC] Added point %d: weight=%.3f  raw=%.2f\n", slot, knownWeight, raw);
   LINK_UART.printf("C i=%d  wgt=%.3f  raw=%.2f\n", slot, knownWeight, raw);
@@ -686,12 +977,55 @@ void lc_addCalPoint(float knownWeight) {
   lc_applyCalibration();
 }
 
+void lc_removeCalPoint(int slot) {
+  if (slot < 0 || slot >= LC_INDEX_SIZE) {
+    Serial.printf("[LC] Slot must be 0..%d.\n", LC_INDEX_SIZE - 1);
+    return;
+  }
+  if (!cfg.lc_calUsed[slot]) {
+    Serial.printf("[LC] Slot %d is already empty.\n", slot);
+    return;
+  }
+  Serial.printf("[LC] Removing slot %d: raw=%.2f  weight=%.3f\n",
+                slot, cfg.lc_calRaw[slot], cfg.lc_calWeight[slot]);
+  cfg.lc_calRaw[slot] = 0;
+  cfg.lc_calWeight[slot] = 0;
+  cfg.lc_calUsed[slot] = false;
+  if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
+  lc.setCalibrate(slot, 0, 0);
+  if (lcMutex) xSemaphoreGive(lcMutex);
+  lc_applyCalibration();
+  lc_printMatrix();
+}
+
+// Capture current calibrated reading as the display zero. Matrix unchanged.
+void lc_zeroHere() {
+  float rawUnits;
+  if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
+  rawUnits = lc.get_units(5);
+  if (lcMutex) xSemaphoreGive(lcMutex);
+  g_lcZeroOffset = rawUnits;
+  saveLcZeroOffset();
+  Serial.printf("[LC] Zero here: offset=%.4f  (next read should be ~0)\n", (float)g_lcZeroOffset);
+  LINK_UART.printf("R pos=%ld lc=%.4f\n", stepper.currentPosition(), 0.0f);
+}
+
+void lc_zeroClear() {
+  g_lcZeroOffset = 0.0f;
+  saveLcZeroOffset();
+  Serial.println(F("[LC] Zero offset cleared (display = raw calibrated units)."));
+}
+
 float lc_read(int samples = 3) {
-  if (!lcMutex) return lc.get_units(samples);
-  xSemaphoreTake(lcMutex, portMAX_DELAY);
-  float v = lc.get_units(samples);
-  xSemaphoreGive(lcMutex);
-  return v;
+  float v;
+  if (!lcMutex) v = lc.get_units(samples);
+  else {
+    xSemaphoreTake(lcMutex, portMAX_DELAY);
+    v = lc.get_units(samples);
+    xSemaphoreGive(lcMutex);
+  }
+  // Raw ADC streaming bypasses this path via lc_read_raw().
+  return v - (float)g_lcZeroOffset;
 }
 
 float lc_read_raw(int samples = 1) {
@@ -699,6 +1033,88 @@ float lc_read_raw(int samples = 1) {
   float v = lc.read_average(samples);
   if (lcMutex) xSemaphoreGive(lcMutex);
   return v;
+}
+
+/*
+ * Firmware is the only quality gate. Other serial monitors must be able to
+ * log [CAL] / CSV / LINK lines as-is.
+ *
+ * Responsible checks (all modes):
+ *   - do not clock the HX711 unless DOUT is already LOW (is_ready)
+ *   - reject non-finite, all-ones (-1), and values outside signed 24-bit
+ *
+ * Cal-only extra (raw ADC stream): neighbor framing check. A live force
+ * trace must still be allowed to fall to near-zero (break / unload), so
+ * that heuristic is NOT applied to calibrated units.
+ */
+static float    lcExpectBuf[5];
+static uint8_t  lcExpectN     = 0;
+static uint32_t lcBadFrames   = 0;
+
+static float lc_medianSmall(const float *a, uint8_t n) {
+  float t[5];
+  for (uint8_t i = 0; i < n; i++) t[i] = a[i];
+  for (uint8_t i = 1; i < n; i++) {
+    float key = t[i];
+    int j = (int)i - 1;
+    while (j >= 0 && t[j] > key) { t[j + 1] = t[j]; j--; }
+    t[j + 1] = key;
+  }
+  return t[n / 2];
+}
+
+static void lc_expectReset() {
+  lcExpectN = 0;
+}
+
+static bool lc_rawElectricallyValid(float v) {
+  if (!isfinite(v)) return false;
+  if (v == -1.0f) return false;                 // 24 ones: DOUT high / clocks missed
+  if (fabsf(v) > 8388607.0f) return false;      // not a signed 24-bit code
+  return true;
+}
+
+// Safety net for the raw calibration stream only. Half-scale and collapsed
+// MSBs are bit errors, not a real torque step of ~50% in one HX711 period.
+static bool lc_rawFramingPlausible(float v) {
+  if (lcExpectN < 1) return true;
+  const float expected = lc_medianSmall(lcExpectBuf, lcExpectN);
+  if (fabsf(expected) <= 200000.0f) return true;
+  if (fabsf(v) < 50000.0f) return false;
+  const float ratio = v / expected;
+  if (ratio > 0.35f && ratio < 0.65f) return false;
+  if (fabsf(v - expected) > 1500000.0f) return false;
+  return true;
+}
+
+static void lc_expectPush(float v) {
+  if (fabsf(v) < 50000.0f) return;
+  if (lcExpectN < 5) {
+    lcExpectBuf[lcExpectN++] = v;
+    return;
+  }
+  for (uint8_t i = 0; i < 4; i++) lcExpectBuf[i] = lcExpectBuf[i + 1];
+  lcExpectBuf[4] = v;
+}
+
+// One conversion, only if the chip has a result waiting. false = skip this tick.
+static bool lc_readRawIfReady(float &out) {
+  if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
+  const bool ready = lc.is_ready();
+  float v = 0.f;
+  if (ready) v = lc.read();
+  if (lcMutex) xSemaphoreGive(lcMutex);
+  if (!ready) return false;
+  out = v;
+  return true;
+}
+
+static float lc_rawToPublished(float raw) {
+  if (g_lcRawMode) return raw;
+  if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
+  float u = lc.testCalibration(raw);
+  if (lcMutex) xSemaphoreGive(lcMutex);
+  return u - (float)g_lcZeroOffset;
 }
 
 uint16_t lc_ring_count() {
@@ -797,7 +1213,7 @@ static int seekForceProgress(const TestStep &step) {
     }
   }
 
-  if (cfg.lc_limitsOn) {
+  if (cfg.lc_limitsOn && !g_lcRawMode) {
     if (f > cfg.lc_upperLimit || f < cfg.lc_lowerLimit) {
       Serial.println(F("[SEEK] LC global limit — pausing."));
       g_velocitySeekMode = false;
@@ -871,11 +1287,15 @@ bool lc_inMotionRead(const TestStep &step, long pos, bool doLog) {
   // Non-blocking cache read
   xSemaphoreTake(lcLatestMux, portMAX_DELAY);
   float val = g_lcLatest.value;
+  bool fresh = g_lcLatest.fresh;
+  if (doLog) g_lcLatest.fresh = false;  // consume so we never log a stale ADC at a new pos
   xSemaphoreGive(lcLatestMux);
 
   lastLcValue = val;
 
-  if (doLog) {
+  // Rate triggers can fire faster than a valid HX711 conversion. Skip the log
+  // slot rather than reprinting the previous (or a rejected) frame.
+  if (doLog && fresh) {
     bool useRing;
     lockCfg();
     useRing = cfg.lc_ring_enable;
@@ -911,7 +1331,9 @@ bool lc_inMotionRead(const TestStep &step, long pos, bool doLog) {
     //bool over = (val > cfg.lc_upperLimit || val < cfg.lc_lowerLimit);
     //unlockCfg();
   
-  if (cfg.lc_limitsOn) {
+  // Limits are engineering units (torque). In raw ADC mode the same field is
+  // millions of counts, so a ±9999 limit would abort every sweep on the first sample.
+  if (cfg.lc_limitsOn && !g_lcRawMode) {
     float upper = step.lcCheckLimits ? step.lcStepUpperLimit : cfg.lc_upperLimit;
     float lower = step.lcCheckLimits ? step.lcStepLowerLimit : cfg.lc_lowerLimit;
     bool outside = (val > upper || val < lower);
@@ -1012,13 +1434,18 @@ void printHelp() {
     "TestFixtureV6\n"
     "GLOBAL (any mode):\n"
     "  help | status | flush lc\n"
-    "  mode setup | adj | live\n"
+    "  read lc | read lc raw     -- Stationary load-cell reading\n"
+    "  tare | zero | lc zero     -- Shift display so current reading = 0 (keeps cal)\n"
+    "  zero clear | lc zero clear -- Remove display zero offset\n"
+    "  lc | show lc              -- Show LC limits, cal matrix, zero offset\n"
+    "  get pos | pos             -- Report current motor step position\n"
+    "  mode setup | fixture | adj | live\n"
     "  save        -- Save config + sequence to NVS\n"
     "  load        -- Load config + sequence from NVS\n"
     "  wipe        -- Erase config AND sequence from NVS\n"
     "  save seq | load seq | wipe seq\n"
     "\nSETUP MODE — sequence building:\n"
-    "  G0 X<steps|XA..XD> [F<sps>] [A<sps2>]   -- Move (no LC)\n"
+    "  G0 X<steps|XA..XE> [F<sps>] [A<sps2>]   -- Move (no LC)\n"
     "  G0 X<..> [F<..>] [A<..>] LC [R<n>] [RT<ms>] [P<s1,s2,...>] [L<0|1>]\n"
     "                                             -- Move WITH in-motion LC\n"
     "    LC        -- enable in-motion sampling\n"
@@ -1105,18 +1532,30 @@ void printHelp() {
     "  set break2_threshold <0..4095>\n"
     "  set break1_hyst <0..2048> -- ANALOG hysteresis band (anti-chatter)\n"
     "  set break2_hyst <0..2048>\n"
-    "\nADJUSTMENTS MODE:\n"
+    "\nFIXTURE MODE — load-cell calibration / fixture bring-up:\n"
     "  jog <steps>               -- Jog (+ or -); prints position live\n"
-    "  goto <steps|XA..XD>\n"
-    "  setpos home                   -- Set current position as step 0\n"
-    "  setpos XA [<steps>]       -- Save position as named variable\n"
-    "  listpos\n"
-    "  tare | cal weight <val> | cal clear | cal preset | read lc | read lc raw\n"
-    "  seek force <f> [vmax] [creep]  -- PI+D seek (uses set seek_* defaults)\n"
-    "  seek stop | flush lc\n"
+    "  goto <steps|XA..XE>\n"
+    "  setpos home               -- Set current position as step 0\n"
+    "  cal tare                  -- DESTRUCTIVE: wipe cal, set slot0 raw->0 (prefer 'zero')\n"
+    "  cal weight <val> | cal weight  -- Add multipoint cal (use 0 for a true zero point)\n"
+    "  cal remove <idx> | cal del <idx>  -- Delete one cal slot and re-apply\n"
+    "  cal clear | cal preset | cal preset save | cal preset factory\n"
+    "  zero | tare | lc zero     -- Fixture zero: shift scale, keep cal matrix\n"
+    "  zero clear\n"
+    "  lc | show lc\n"
+    "  lc raw on | lc raw off\n"
+    "  seek stop                 -- Stop motor / abort seek\n"
     "  cal upload <idx>          -- Bulk cal entry from slot <idx>; lines: <raw>;<weight>; END\n"
     "    e.g. cal upload 0  then  42484.60;0.00  then  283636.41;9.75  then  END\n"
     "    Use cal upload 5 to append from slot 5, leaving slots 0-4 unchanged\n"
+    "\nADJUSTMENTS MODE — test setup:\n"
+    "  jog <steps>               -- Jog (+ or -); prints position live\n"
+    "  goto <steps|XA..XE>\n"
+    "  setpos home                   -- Set current position as step 0\n"
+    "  setpos XA..XE [<steps>]   -- Save position as named variable\n"
+    "  listpos\n"
+    "  seek force <f> [vmax] [creep]  -- PI+D seek (uses set seek_* defaults)\n"
+    "  seek stop | flush lc\n"
     "  servo <deg>               -- Move servo to angle (0..180)\n"
     "  servo us <us>             -- Move servo to raw pulse width (calibration)\n"
     "  servo set S<A-D> [<deg>]  -- Save current/given angle into slot (SA..SD)\n"
@@ -1125,10 +1564,12 @@ void printHelp() {
     "  servo off                 -- Stop emitting pulses (silence servo)\n"
     "  read bb | read bb1 | read bb2  -- Read break-beam sensors\n"
     "\nLIVE TEST MODE:\n"
-    "  start <n>                 -- Run n cycles (LC per G0 step definitions)\n"
+    "  start <n>                 -- Absolute target: run until total completed cycles reach n\n"
     "  start <n> LC every <k>   -- Full LC log every k-th cycle; others check limits only\n"
     "  start <n> LC cycles <c1,c2,...>  -- Full LC log on listed cycles only\n"
     "  pause | resume | stop | status\n"
+    "  cycles                    -- Show completed / target cycle counts\n"
+    "  cycles reset              -- Clear completed count to 0 (keeps target)\n"
     "==================================\n"
   ));
 }
@@ -1140,13 +1581,20 @@ void printStatus() {
   Serial.printf("Motor pos: %ld  steps/rev: %ld\n", stepper.currentPosition(), cfg.stepsPerRev);
   Serial.printf("Speed: %.0f sps   Accel: %.0f sps^2\n", cfg.maxSpeed_sps, cfg.accel_sps2);
   Serial.printf("Cycles: %d / %d   Seq steps: %d\n", cyclesDone, cyclesGoal, numSteps);
-  Serial.printf("LC limits: %s  [%.3f .. %.3f]\n",
-                cfg.lc_limitsOn ? "ON" : "off", cfg.lc_lowerLimit, cfg.lc_upperLimit);
-  Serial.printf("LC in-motion defaults: R=%d  RT=%lu ms\n",
-                cfg.lc_inMotionSamples, (unsigned long)cfg.lc_inMotionRateMs);
-  Serial.printf("LC ring: %s  thresh=%u  sampler=%u ms\n",
-                cfg.lc_ring_enable ? "ON" : "off",
-                (unsigned)cfg.lc_ring_flush_thresh, (unsigned)cfg.lc_sampler_period_ms);
+  {
+    int nPts = 0;
+    for (int i = 0; i < LC_INDEX_SIZE; i++) if (cfg.lc_calUsed[i]) nPts++;
+    Serial.printf("LC limits: %s  [%.3f .. %.3f]\n",
+                  cfg.lc_limitsOn ? "ON" : "off", cfg.lc_lowerLimit, cfg.lc_upperLimit);
+    Serial.printf("LC zero offset: %.4f   cal points: %d/%d   stream: %s\n",
+                  (float)g_lcZeroOffset, nPts, LC_INDEX_SIZE,
+                  g_lcRawMode ? "RAW" : "cal");
+    Serial.printf("LC in-motion defaults: R=%d  RT=%lu ms\n",
+                  cfg.lc_inMotionSamples, (unsigned long)cfg.lc_inMotionRateMs);
+    Serial.printf("LC ring: %s  thresh=%u  sampler=%u ms\n",
+                  cfg.lc_ring_enable ? "ON" : "off",
+                  (unsigned)cfg.lc_ring_flush_thresh, (unsigned)cfg.lc_sampler_period_ms);
+  }
   Serial.printf("Seek defaults: Kp=%.2f Ki=%.2f Kd=%.4f Vmax=%.0f creep=%.0f eps=%.4f T=%lums dir=%d\n",
                 cfg.seek_kp, cfg.seek_ki, cfg.seek_kd, cfg.seek_vmax, cfg.seek_vcreep,
                 cfg.seek_epsilon, (unsigned long)cfg.seek_settle_ms, (int)cfg.seek_dir);
@@ -1406,8 +1854,85 @@ static String condToStr(uint8_t srcU, uint8_t opU, float val) {
 // ============================================================================
 // G-CODE PARSER
 // ============================================================================
+
 /*
- * G0 / G1  X<n|XA..XD>  [F<n>]  [A<n>]  [LC [R<n>] [RT<n>] [P<n,n,...>] [L<n>]]
+ * Parameter lookup helpers.
+ *
+ * G-code parameters are whitespace-delimited tokens (';' also ends a token so
+ * trailing semicolons from the display ESP32 are harmless). Matching a bare
+ * letter anywhere in the line is wrong: the 'A' in "XA" is not an accel
+ * parameter and the 'L' in "LC" is not a limit flag. These helpers only match
+ * a key at the START of a token, and numeric lookups additionally require a
+ * number right after the key, so "L1" matches key "L" but "LC" and "LL8" do not.
+ */
+
+static inline bool gcodeIsDelim(char c) { return c == ' ' || c == '\t' || c == ';'; }
+
+static inline bool gcodeIsNumStart(char c) {
+  return (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.';
+}
+
+// Returns the index of the first character after `key`, or -1 if no token matches.
+// requireNumeric: the character after the key must begin a number.
+static int gcodeFindParam(const String &line, const char *key, bool requireNumeric) {
+  const int keyLen = (int)strlen(key);
+  const int n      = (int)line.length();
+  int i = 0;
+  while (i < n) {
+    while (i < n && gcodeIsDelim(line.charAt(i))) i++;
+    const int tokStart = i;
+    while (i < n && !gcodeIsDelim(line.charAt(i))) i++;
+    const int tokEnd = i;                       // exclusive
+    if (tokEnd - tokStart < keyLen) continue;
+
+    bool match = true;
+    for (int k = 0; k < keyLen; k++) {
+      if (line.charAt(tokStart + k) != key[k]) { match = false; break; }
+    }
+    if (!match) continue;
+
+    const int valIdx = tokStart + keyLen;
+    if (requireNumeric && (valIdx >= tokEnd || !gcodeIsNumStart(line.charAt(valIdx)))) continue;
+    return valIdx;
+  }
+  return -1;
+}
+
+static float gcodeGetFloat(const String &line, const char *key, float defVal) {
+  int i = gcodeFindParam(line, key, true);
+  return (i < 0) ? defVal : line.substring(i).toFloat();
+}
+
+static long gcodeGetLong(const String &line, const char *key, long defVal) {
+  int i = gcodeFindParam(line, key, true);
+  return (i < 0) ? defVal : line.substring(i).toInt();
+}
+
+// True when `tok` appears as a complete token (e.g. the "LC" keyword or a bare "P").
+static bool gcodeHasFlag(const String &line, const char *tok) {
+  int i = gcodeFindParam(line, tok, false);
+  if (i < 0) return false;
+  return (i >= (int)line.length()) || gcodeIsDelim(line.charAt(i));
+}
+
+// Returns the letter directly after `key` (e.g. 'A' from "SNA"), or 0 if absent.
+static char gcodeGetLetter(const String &line, const char *key) {
+  int i = gcodeFindParam(line, key, false);
+  if (i < 0 || i >= (int)line.length() || gcodeIsDelim(line.charAt(i))) return 0;
+  return line.charAt(i);
+}
+
+// Copies the token text following `key` (e.g. "100,200,300" from "P100,200,300").
+static String gcodeGetToken(const String &line, const char *key) {
+  int i = gcodeFindParam(line, key, true);
+  if (i < 0) return String("");
+  int end = i;
+  while (end < (int)line.length() && !gcodeIsDelim(line.charAt(end))) end++;
+  return line.substring(i, end);
+}
+
+/*
+ * G0 / G1  X<n|XA..XE>  [F<n>]  [A<n>]  [LC [R<n>] [RT<n>] [P<n,n,...>] [L<n>]]
  * G4       P<n>
  * M100     [R<n>] [L<n>]
  *
@@ -1430,86 +1955,52 @@ void parseGCode(const String &rawLine) {
     return;
   }
 
-  // Generic single-letter float extractor (returns defaultVal if letter absent)
-  auto getParam = [&](char letter, float defaultVal) -> float {
-    int idx = line.indexOf(letter);
-    if (idx < 0) return defaultVal;
-    return line.substring(idx + 1).toFloat();
-  };
-
-  // Two-letter parameter extractor (RT, etc.)
-  auto get2Param = [&](const char* key, float defaultVal) -> float {
-    int idx = line.indexOf(key);
-    if (idx < 0) return defaultVal;
-    return line.substring(idx + strlen(key)).toFloat();
-  };
-
   TestStep step = {};
 
   // ---- G0 / G1 : Move ----
   if (line.startsWith("G0") || line.startsWith("G1")) {
     step.type  = StepType::MOVE;
-    step.speed = getParam('F', 0.0f);
-    step.accel = getParam('A', 0.0f);
+    step.speed = gcodeGetFloat(line, "F", 0.0f);
+    step.accel = gcodeGetFloat(line, "A", 0.0f);
 
-    // X parameter
-    int xIdx = line.indexOf('X');
+    // X parameter: X<steps> or X<A..D> named position
+    int xIdx = gcodeFindParam(line, "X", false);
     if (xIdx < 0) { Serial.println(F("[G0] Missing X. Example: G0 X4000 F1200 A8000")); return; }
-    char afterX = line.charAt(xIdx + 1);
+    char afterX = (xIdx < (int)line.length()) ? line.charAt(xIdx) : 0;
     int  varIdx = namedPosIdx(afterX);
     if (varIdx >= 0) {
       step.useNamedPos = true;
       step.posVarIdx   = (uint8_t)varIdx;
     } else {
       step.useNamedPos = false;
-      step.targetSteps = line.substring(xIdx + 1).toInt();
+      step.targetSteps = line.substring(xIdx).toInt();
     }
 
-    // In-motion LC: look for "LC" keyword
-    int lcIdx = line.indexOf(" LC");
-    if (lcIdx >= 0) {
+    // In-motion LC: look for the "LC" keyword
+    if (gcodeHasFlag(line, "LC")) {
       step.lcInMotion = true;
 
-      // R<n> — samples (space+R so "RT" is not mistaken for R)
-      String lcPart = line.substring(lcIdx);
-      int rSp = lcPart.indexOf(" R");
-      step.lcSamples = (rSp >= 0) ? (uint8_t)lcPart.substring(rSp + 2).toInt() : 0;
+      step.lcSamples     = (uint8_t)gcodeGetLong(line, "R", 0);        // "RT50" does not match "R"
+      step.lcRateMs      = (uint32_t)gcodeGetLong(line, "RT", 0);
+      step.lcCheckLimits = (gcodeGetLong(line, "L", 0) != 0);          // "LC"/"LL8" do not match "L"
 
-      // RT<n> — rate interval ms
-      int rtIdx = lcPart.indexOf("RT");
-      step.lcRateMs = (rtIdx >= 0) ? (uint32_t)lcPart.substring(rtIdx + 2).toFloat() : 0;
-
-      // L<n> — limit check
-      int lIdx = lcPart.indexOf('L');
-      step.lcCheckLimits = (lIdx >= 0) && (lcPart.charAt(lIdx + 1) == '1');
-      
-      // After parsing L1 in the LC section:
-      int ulIdx = lcPart.indexOf("UL");
-      step.lcStepUpperLimit = (ulIdx >= 0) ? lcPart.substring(ulIdx + 2).toFloat() : cfg.lc_upperLimit;
-      int llIdx = lcPart.indexOf("LL");
-      step.lcStepLowerLimit = (llIdx >= 0) ? lcPart.substring(llIdx + 2).toFloat() : cfg.lc_lowerLimit;
+      step.lcStepUpperLimit = gcodeGetFloat(line, "UL", cfg.lc_upperLimit);
+      step.lcStepLowerLimit = gcodeGetFloat(line, "LL", cfg.lc_lowerLimit);
 
       // P<s1,s2,...> — position list
-      int pIdx = lcPart.indexOf('P');
       step.lcPosCount = 0;
-      if (pIdx >= 0) {
-        String posStr = lcPart.substring(pIdx + 1);
-        // Read up to the next space or end of string
-        int endIdx = posStr.indexOf(' ');
-        if (endIdx > 0) posStr = posStr.substring(0, endIdx);
-        // Parse comma-separated values
-        int start = 0;
-        while (start < (int)posStr.length() && step.lcPosCount < MAX_LC_POSITIONS) {
-          int comma = posStr.indexOf(',', start);
-          String token = (comma < 0) ? posStr.substring(start)
-                                     : posStr.substring(start, comma);
-          token.trim();
-          if (token.length() > 0) {
-            step.lcPositions[step.lcPosCount++] = token.toInt();
-          }
-          if (comma < 0) break;
-          start = comma + 1;
+      String posStr = gcodeGetToken(line, "P");
+      int start = 0;
+      while (start < (int)posStr.length() && step.lcPosCount < MAX_LC_POSITIONS) {
+        int comma = posStr.indexOf(',', start);
+        String token = (comma < 0) ? posStr.substring(start)
+                                   : posStr.substring(start, comma);
+        token.trim();
+        if (token.length() > 0) {
+          step.lcPositions[step.lcPosCount++] = token.toInt();
         }
+        if (comma < 0) break;
+        start = comma + 1;
       }
 
       if (!step.lcRateMs && !step.lcPosCount) {
@@ -1520,17 +2011,14 @@ void parseGCode(const String &rawLine) {
 
     // Concurrent servo: SN<A..D> = named pos, SV<deg> = degree value
     {
-      int snIdx = line.indexOf("SN");
-      if (snIdx >= 0) {
-        int svar = servoNamedIdx(line.charAt(snIdx + 2));
-        if (svar >= 0) {
-          step.servoWithMove      = true;
-          step.servoMoveUseNamed  = true;
-          step.servoMoveVarIdx    = (uint8_t)svar;
-        }
+      int svar = servoNamedIdx(gcodeGetLetter(line, "SN"));
+      if (svar >= 0) {
+        step.servoWithMove      = true;
+        step.servoMoveUseNamed  = true;
+        step.servoMoveVarIdx    = (uint8_t)svar;
       }
       if (!step.servoWithMove) {
-        float svDeg = get2Param("SV", -1.0f);
+        float svDeg = gcodeGetFloat(line, "SV", -1.0f);
         if (svDeg >= 0.f && svDeg <= 180.f) {
           step.servoWithMove     = true;
           step.servoMoveUseNamed = false;
@@ -1540,8 +2028,8 @@ void parseGCode(const String &rawLine) {
     }
 
     // Step label (N) and goto-on-fail label (J) — shared by all step types
-    step.stepLabel = (uint8_t)getParam('N', 0.f);
-    step.gotoLabel = (uint8_t)getParam('J', 0.f);
+    step.stepLabel = (uint8_t)gcodeGetLong(line, "N", 0);
+    step.gotoLabel = (uint8_t)gcodeGetLong(line, "J", 0);
 
     lockSeq();
     testSequence[numSteps++] = step;
@@ -1572,20 +2060,23 @@ void parseGCode(const String &rawLine) {
   //   G4 P<ms>  -> timed dwell
   //   G4 P      -> pause here; resume with 'resume' command (advances to next step)
   if (line.startsWith("G4")) {
-    int pIdx = line.indexOf('P');
-    bool hasNumericP = false;
-    if (pIdx >= 0) {
-      for (int i = pIdx + 1; i < (int)line.length(); i++) {
-        char c = line.charAt(i);
-        if (c == ' ' || c == '\t') continue;
-        if (isDigit((unsigned char)c) || c == '-' || c == '+' || c == '.') hasNumericP = true;
-        break;
-      }
+    // "P<ms>" and "P <ms>" are dwells; a bare "P" is a pause marker.
+    uint32_t dwellMs = 1000;
+    bool     isPause = false;
+    int pValIdx = gcodeFindParam(line, "P", true);
+    if (pValIdx >= 0) {
+      dwellMs = (uint32_t)line.substring(pValIdx).toFloat();
+    } else if (gcodeHasFlag(line, "P")) {
+      String rest = line.substring(gcodeFindParam(line, "P", false));
+      rest.trim();
+      if (rest.length() > 0 && gcodeIsNumStart(rest.charAt(0))) dwellMs = (uint32_t)rest.toFloat();
+      else                                                      isPause = true;
     }
-    if (pIdx >= 0 && !hasNumericP) {
+
+    if (isPause) {
       step.type      = StepType::PAUSE;
-      step.stepLabel = (uint8_t)getParam('N', 0.f);
-      step.gotoLabel = (uint8_t)getParam('J', 0.f);
+      step.stepLabel = (uint8_t)gcodeGetLong(line, "N", 0);
+      step.gotoLabel = (uint8_t)gcodeGetLong(line, "J", 0);
       lockSeq();
       testSequence[numSteps++] = step;
       unlockSeq();
@@ -1595,9 +2086,9 @@ void parseGCode(const String &rawLine) {
       return;
     }
     step.type      = StepType::DWELL;
-    step.dwellMs   = (uint32_t)getParam('P', 1000.0f);
-    step.stepLabel = (uint8_t)getParam('N', 0.f);
-    step.gotoLabel = (uint8_t)getParam('J', 0.f);
+    step.dwellMs   = dwellMs;
+    step.stepLabel = (uint8_t)gcodeGetLong(line, "N", 0);
+    step.gotoLabel = (uint8_t)gcodeGetLong(line, "J", 0);
     lockSeq();
     testSequence[numSteps++] = step;
     unlockSeq();
@@ -1611,14 +2102,14 @@ void parseGCode(const String &rawLine) {
   // M100 [R<n>] [L<0|1>] [UL<upper>] [LL<lower>] [N<label>] [J<goto_label>]
   if (line.startsWith("M100")) {
     step.type        = StepType::READ_LC;
-    step.lcReadings  = max((uint8_t)1, (uint8_t)getParam('R', 5.0f));
-    step.checkLimits = ((int)getParam('L', 0.0f)) != 0;
+    step.lcReadings  = max((uint8_t)1, (uint8_t)gcodeGetLong(line, "R", 5));
+    step.checkLimits = (gcodeGetLong(line, "L", 0) != 0);
     lockCfg();
-    step.readStepUpperLimit = get2Param("UL", cfg.lc_upperLimit);
-    step.readStepLowerLimit = get2Param("LL", cfg.lc_lowerLimit);
+    step.readStepUpperLimit = gcodeGetFloat(line, "UL", cfg.lc_upperLimit);
+    step.readStepLowerLimit = gcodeGetFloat(line, "LL", cfg.lc_lowerLimit);
     unlockCfg();
-    step.stepLabel = (uint8_t)getParam('N', 0.f);
-    step.gotoLabel = (uint8_t)getParam('J', 0.f);
+    step.stepLabel = (uint8_t)gcodeGetLong(line, "N", 0);
+    step.gotoLabel = (uint8_t)gcodeGetLong(line, "J", 0);
     lockSeq();
     testSequence[numSteps++] = step;
     unlockSeq();
@@ -1636,30 +2127,25 @@ void parseGCode(const String &rawLine) {
   // M101 F<target> V<max_sps> C<creep_sps> E<epsilon> T<settle_ms> P<Kp> I<Ki> D<Kd> S<dir> X<max_travel_steps>
   if (line.startsWith("M101")) {
     step.type = StepType::SEEK_FORCE;
-    int fIdx = line.indexOf('F');
-    if (fIdx < 0 || fIdx >= (int)line.length() - 1) {
+    int fIdx = gcodeFindParam(line, "F", true);
+    if (fIdx < 0) {
       Serial.println(F("[M101] Missing F (target force). Example: M101 F12.5 V600 C40"));
       return;
     }
-    auto gp = [&](char letter, float defVal) -> float {
-      int i = line.indexOf(letter);
-      if (i < 0) return defVal;
-      return line.substring(i + 1).toFloat();
-    };
     lockCfg();
-    step.sfTarget    = line.substring(fIdx + 1).toFloat();
-    step.sfMaxSps    = gp('V', cfg.seek_vmax);
-    step.sfCreepSps  = gp('C', cfg.seek_vcreep);
-    step.sfEpsilon   = gp('E', cfg.seek_epsilon);
-    step.sfSettleMs  = (uint32_t)gp('T', (float)cfg.seek_settle_ms);
-    step.sfKp        = gp('P', cfg.seek_kp);
-    step.sfKi        = gp('I', cfg.seek_ki);
-    step.sfKd        = gp('D', cfg.seek_kd);
-    int sgn          = (int)gp('S', (float)cfg.seek_dir);
+    step.sfTarget    = line.substring(fIdx).toFloat();
+    step.sfMaxSps    = gcodeGetFloat(line, "V", cfg.seek_vmax);
+    step.sfCreepSps  = gcodeGetFloat(line, "C", cfg.seek_vcreep);
+    step.sfEpsilon   = gcodeGetFloat(line, "E", cfg.seek_epsilon);
+    step.sfSettleMs  = (uint32_t)gcodeGetLong(line, "T", (long)cfg.seek_settle_ms);
+    step.sfKp        = gcodeGetFloat(line, "P", cfg.seek_kp);
+    step.sfKi        = gcodeGetFloat(line, "I", cfg.seek_ki);
+    step.sfKd        = gcodeGetFloat(line, "D", cfg.seek_kd);
+    int sgn          = (int)gcodeGetLong(line, "S", (long)cfg.seek_dir);
     step.sfDir       = (int8_t)(sgn >= 0 ? 1 : -1);
-    step.sfMaxTravel = (long)gp('X', 0.f);
-    step.stepLabel   = (uint8_t)gp('N', 0.f);
-    step.gotoLabel   = (uint8_t)gp('J', 0.f);
+    step.sfMaxTravel = gcodeGetLong(line, "X", 0);
+    step.stepLabel   = (uint8_t)gcodeGetLong(line, "N", 0);
+    step.gotoLabel   = (uint8_t)gcodeGetLong(line, "J", 0);
     unlockCfg();
     if (step.sfCreepSps < 1.f) step.sfCreepSps = 1.f;
     if (step.sfMaxSps < step.sfCreepSps) step.sfMaxSps = step.sfCreepSps;
@@ -1681,23 +2167,20 @@ void parseGCode(const String &rawLine) {
     step.type = StepType::SERVO_MOVE;
 
     // Check for named servo position: S<A..D>
-    int sIdx = line.indexOf(" S");
-    if (sIdx >= 0) {
-      int svar = servoNamedIdx(line.charAt(sIdx + 2));
-      if (svar >= 0) {
-        step.servoUseNamed = true;
-        step.servoVarIdx   = (uint8_t)svar;
-      }
+    int svar = servoNamedIdx(gcodeGetLetter(line, "S"));
+    if (svar >= 0) {
+      step.servoUseNamed = true;
+      step.servoVarIdx   = (uint8_t)svar;
     }
     if (!step.servoUseNamed) {
-      step.servoDeg = getParam('D', -1.0f);
+      step.servoDeg = gcodeGetFloat(line, "D", -1.0f);
       if (step.servoDeg < 0.f || step.servoDeg > 180.f) {
         Serial.println(F("[M200] Provide S<A-D> or D<deg 0-180>. Example: M200 D45  or  M200 SA"));
         return;
       }
     }
-    step.stepLabel = (uint8_t)getParam('N', 0.f);
-    step.gotoLabel = (uint8_t)getParam('J', 0.f);
+    step.stepLabel = (uint8_t)gcodeGetLong(line, "N", 0);
+    step.gotoLabel = (uint8_t)gcodeGetLong(line, "J", 0);
     lockSeq();
     testSequence[numSteps++] = step;
     unlockSeq();
@@ -1719,12 +2202,12 @@ void parseGCode(const String &rawLine) {
   //   J = on failure (wrong state or timeout) jump to step labeled J instead of pausing
   if (line.startsWith("M202")) {
     step.type         = StepType::WAIT_BB;
-    step.bbSensor     = (uint8_t)constrain((int)getParam('B', 1.f), 1, 2);
-    step.bbExpected   = ((int)getParam('E', 0.f)) != 0;
-    step.bbWaitMode   = ((int)getParam('W', 0.f)) != 0;
-    step.bbTimeoutMs  = (uint32_t)getParam('T', 0.f);
-    step.stepLabel    = (uint8_t)getParam('N', 0.f);
-    step.gotoLabel    = (uint8_t)getParam('J', 0.f);
+    step.bbSensor     = (uint8_t)constrain((int)gcodeGetLong(line, "B", 1), 1, 2);
+    step.bbExpected   = (gcodeGetLong(line, "E", 0) != 0);
+    step.bbWaitMode   = (gcodeGetLong(line, "W", 0) != 0);
+    step.bbTimeoutMs  = (uint32_t)gcodeGetLong(line, "T", 0);
+    step.stepLabel    = (uint8_t)gcodeGetLong(line, "N", 0);
+    step.gotoLabel    = (uint8_t)gcodeGetLong(line, "J", 0);
     lockSeq();
     testSequence[numSteps++] = step;
     unlockSeq();
@@ -2129,6 +2612,8 @@ void handleCommand(const String &rawLine) {
       inCalUploadMode = false;
       lc_applyCalibration();
       Serial.println(F("[CAL UPLOAD] Done. Calibration applied."));
+      Serial.println(F("[CAL UPLOAD] Snapshot as restore preset:  cal preset save"));
+      Serial.println(F("[CAL UPLOAD] Then 'save' to keep the working table across reboot."));
       lc_printMatrix();
     } else {
       // Parse "raw;weight"
@@ -2141,6 +2626,12 @@ void handleCommand(const String &rawLine) {
       float weight = s.substring(sep + 1).toFloat();
       if (calUploadSlot >= LC_INDEX_SIZE) {
         Serial.println(F("[CAL UPLOAD] Matrix full! Send END."));
+        return;
+      }
+      if (fabsf(raw) < 500.0f) {
+        Serial.printf("[CAL UPLOAD] REJECTED slot %d: raw=%.2f looks like a weight, not ADC. "
+                      "Format is <raw>;<weight>  (e.g. 94092.40;0.00). Line skipped.\n",
+                      calUploadSlot, raw);
         return;
       }
       lockCfg();
@@ -2161,12 +2652,55 @@ void handleCommand(const String &rawLine) {
   if (sl == "status") { printStatus(); return; }
   if (sl == "flush lc") { lc_ring_flush(); return; }
 
+  if (sl == "read lc") {
+    float calUnits;
+    if (lcMutex) xSemaphoreTake(lcMutex, portMAX_DELAY);
+    calUnits = lc.get_units(5);
+    if (lcMutex) xSemaphoreGive(lcMutex);
+    float off = (float)g_lcZeroOffset;
+    float w   = calUnits - off;
+    Serial.printf("[LC] %.4f  (cal=%.4f  offset=%.4f)\n", w, calUnits, off);
+    LINK_UART.printf("R pos=%ld lc=%.4f\n", stepper.currentPosition(), w);  // R=Result
+    return;
+  }
+  if (sl == "read lc raw") {
+    Serial.printf("[LC] raw=%.2f\n", lc_read_raw(5));
+    return;
+  }
+  if (sl == "lc" || sl == "show lc") {
+    printLcSettings();
+    return;
+  }
+  if (sl == "lc raw on")  { g_lcRawMode = true;  Serial.println(F("[LC] Raw mode ON — streaming raw ADC counts. Limits ignored.")); return; }
+  if (sl == "lc raw off") { g_lcRawMode = false; Serial.println(F("[LC] Raw mode OFF — streaming calibrated units.")); return; }
+  if (sl == "zero" || sl == "lc zero" || sl == "tare") {
+    // 'tare' aliases zero-here so ADJUSTMENTS / habit don't hit "unknown command".
+    // Destructive matrix wipe remains 'cal tare' in FIXTURE mode.
+    if (sl == "tare") {
+      Serial.println(F("[LC] Note: 'tare' now means zero-here (keeps cal). "
+                       "Destructive wipe: 'cal tare' in FIXTURE."));
+    }
+    lc_zeroHere();
+    return;
+  }
+  if (sl == "zero clear" || sl == "lc zero clear") {
+    lc_zeroClear();
+    return;
+  }
+  if (sl == "get pos" || sl == "pos") {
+    long pos = stepper.currentPosition();
+    Serial.printf("[POS] %ld\n", pos);
+    LINK_UART.printf("P pos=%ld\n", pos);  // P = Position update
+    return;
+  }
+
   if (sl.startsWith("mode ")) {
     String m = sl.substring(5); m.trim();
     if      (m == "setup")                     { currentMode = Mode::SETUP;       runState = RunState::IDLE; Serial.println(F("Mode -> SETUP")); }
+    else if (m == "fixture" || m == "fix")    { currentMode = Mode::FIXTURE;     runState = RunState::IDLE; Serial.println(F("Mode -> FIXTURE")); }
     else if (m == "adj" || m == "adjustments") { currentMode = Mode::ADJUSTMENTS; runState = RunState::IDLE; Serial.println(F("Mode -> ADJUSTMENTS")); }
     else if (m == "live" || m == "live_test")  { currentMode = Mode::LIVE_TEST;   Serial.println(F("Mode -> LIVE_TEST")); }
-    else Serial.println(F("Unknown mode. Options: setup | adj | live"));
+    else Serial.println(F("Unknown mode. Options: setup | fixture | adj | live"));
     return;
   }
 
@@ -2182,8 +2716,11 @@ void handleCommand(const String &rawLine) {
     return;
   }
   if (sl == "wipe") {
-    bool c = wipeConfig(), sq = wipeSequence();
-    Serial.printf("Config %s | Sequence %s\n", c?"wiped":"FAILED", sq?"wiped":"FAILED");
+    bool c = wipeConfig(), sq = wipeSequence(), cy = wipeCycleProgress(), z = wipeLcZeroOffset();
+    Serial.printf("Config %s | Sequence %s | Cycles %s | LC zero %s\n",
+                  c?"wiped":"FAILED", sq?"wiped":"FAILED", cy?"wiped":"FAILED",
+                  z?"wiped":"FAILED");
+    reportCycleProgress();
     return;
   }
   if (sl == "save seq") { saveSequence() ? Serial.println(F("Sequence saved."))    : Serial.println(F("ERROR: save failed.")); return; }
@@ -2267,9 +2804,9 @@ void handleCommand(const String &rawLine) {
   }
 
   // ------------------------------------------------------------------
-  // ADJUSTMENTS mode
+  // Shared motion helpers for FIXTURE and ADJUSTMENTS
   // ------------------------------------------------------------------
-  if (currentMode == Mode::ADJUSTMENTS) {
+  if (currentMode == Mode::FIXTURE || currentMode == Mode::ADJUSTMENTS) {
     if (sl.startsWith("jog ")) {
       long delta = sl.substring(4).toInt();
       // Use moveTo(current + delta) so AccelStepper plans one smooth trapezoid.
@@ -2278,7 +2815,8 @@ void handleCommand(const String &rawLine) {
       long newTarget = stepper.currentPosition() + delta;
       stepper.moveTo(newTarget);
       jogMoveDone = false;
-      Serial.printf("[ADJ] Jog %+ld -> target %ld\n", delta, newTarget);
+      Serial.printf("[%s] Jog %+ld -> target %ld\n",
+                    currentMode == Mode::FIXTURE ? "FIXTURE" : "ADJ", delta, newTarget);
       return;
     }
     if (sl.startsWith("goto ")) {
@@ -2289,43 +2827,45 @@ void handleCommand(const String &rawLine) {
           lockCfg();
           bool isSet = cfg.namedPosSet[idx]; long pos = cfg.namedPositions[idx];
           unlockCfg();
-          if (isSet) { stepper.moveTo(pos); Serial.printf("[ADJ] -> X%c = %ld\n", 'A'+idx, pos); }
-          else         Serial.printf("[ADJ] X%c not set.\n", 'A'+idx);
-        } else Serial.println(F("[ADJ] Use XA..XD."));
+          if (isSet) { stepper.moveTo(pos); Serial.printf("[%s] -> X%c = %ld\n", currentMode == Mode::FIXTURE ? "FIXTURE" : "ADJ", 'A'+idx, pos); }
+          else         Serial.printf("[%s] X%c not set.\n", currentMode == Mode::FIXTURE ? "FIXTURE" : "ADJ", 'A'+idx);
+        } else Serial.println(F("Use XA..XE."));
       } else {
         long tgt = arg.toInt(); stepper.moveTo(tgt);
-        Serial.printf("[ADJ] -> %ld\n", tgt);
+        Serial.printf("[%s] -> %ld\n", currentMode == Mode::FIXTURE ? "FIXTURE" : "ADJ", tgt);
       }
       return;
     }
     if (sl == "setpos home") {
       stepper.setCurrentPosition(0);
-      Serial.println(F("[ADJ] Home set to 0"));
+      Serial.println(F("Home set to 0"));
       LINK_UART.printf("P pos=%ld\n", 0L);  // P = Position update
+      return;
+    }
+    if (sl == "seek stop") {
+      g_adjSeekActive    = false;
+      g_velocitySeekMode = false;
+      g_velocityCommand  = 0.f;
+      stepper.stop();
+      memset(&g_seekRT, 0, sizeof g_seekRT);
+      Serial.println(F("Seek/jog stopped."));
+      return;
+    }
+  }
 
-      return;
-    }
-    if (sl.startsWith("setpos ")) {
-      String args = sl.substring(7); args.trim();
-      if (args.length() < 2 || args.charAt(0) != 'x') { Serial.println(F("Usage: setpos XA [<steps>]")); return; }
-      int idx = namedPosIdx(args.charAt(1));
-      if (idx < 0) { Serial.println(F("Use XA..XD.")); return; }
-      long pos = (args.length() > 3) ? args.substring(3).toInt() : stepper.currentPosition();
-      lockCfg(); cfg.namedPositions[idx] = pos; cfg.namedPosSet[idx] = true; unlockCfg();
-      Serial.printf("[ADJ] X%c = %ld\n", 'A'+idx, pos);
-      return;
-    }
-    if (sl == "listpos") {
-      lockCfg();
-      for (int i = 0; i < NUM_NAMED_POS; i++) {
-        if (cfg.namedPosSet[i]) Serial.printf("  X%c = %ld\n", 'A'+i, cfg.namedPositions[i]);
-        else                    Serial.printf("  X%c = (unset)\n", 'A'+i);
-      }
-      unlockCfg(); return;
-    }
-    if (sl == "tare")          { lc_tare(); return; }
+  // ------------------------------------------------------------------
+  // FIXTURE mode — LC calibration / fixture bring-up
+  // ------------------------------------------------------------------
+  if (currentMode == Mode::FIXTURE) {
+    if (sl == "cal tare")      { lc_tare(); return; }
     if (sl.startsWith("cal weight ")) { lc_addCalPoint(sl.substring(11).toFloat()); return; }
     if (sl == "cal weight")    { lc_addCalPoint(cfg.lc_knownWeight); return; }
+    if (sl.startsWith("cal remove ") || sl.startsWith("cal del ")) {
+      int sp = sl.indexOf(' ');
+      sp = sl.indexOf(' ', sp + 1);
+      lc_removeCalPoint(sl.substring(sp + 1).toInt());
+      return;
+    }
 
     // cal upload <startIndex>  — bulk raw;weight entry, terminated by END
     // Example:  cal upload 0   then send lines like  42484.60;0.00
@@ -2342,32 +2882,70 @@ void handleCommand(const String &rawLine) {
       Serial.printf("[CAL UPLOAD] Ready from slot %d. Send lines as: <raw>;<weight>  then END.\n", startIdx);
       return;
     }
-    if (sl == "cal preset") {
-      lockCfg(); lc_clearCalibration();
-      //const float rP[] = {-679135.20f,-322304.55f,42789.00f,299100.41f,309657.00f,
-      //                     348070.59f,417649.81f,490064.59f,586401.19f,715813.00f};
-      //const float wP[] = {-30.00f,-15.00f,0.00f,10.30f,10.71f,12.27f,15.09f,18.00f,21.70f,26.80f};
-      // const float rP[] = {-699034.80f,-514919.2f,-333225.2f,-153952.8f,-65224.7f,
-      //                      110415.3f,197327.2f,369334.8f,538920.8f,706085.2f};
-      // const float wP[] = {-40.00f,-30.00f,-20.00f,-10.00f,-5.00f,5.00f,10.00f,20.00f,30.00f,40.00f};
-      const float rP[] = {-2813803.75f, -2189222.25f, -1564640.75f, -940059.31f, -315477.81f,
-                    309103.69f, 933685.19f, 1558266.75f, 2182848.25f, 2807429.75f};
-      const float wP[] = {-160.32f, -124.64f, -89.12f, -53.44f, -17.76f,
-                    17.76f, 53.44f, 89.12f, 124.64f, 160.32f};
-      for (int i = 0; i < LC_INDEX_SIZE; i++) { cfg.lc_calRaw[i]=rP[i]; cfg.lc_calWeight[i]=wP[i]; cfg.lc_calUsed[i]=true; }
-      lc_applyCalibration(); unlockCfg(); lc_printMatrix(); return;
-    }
-    if (sl == "cal clear") { lockCfg(); lc_clearCalibration(); unlockCfg(); Serial.println(F("[LC] Cleared.")); return; }
-    if (sl == "read lc") {
-      float w = lc_read(5);
-      Serial.printf("[LC] %.4f\n", w);
-      LINK_UART.printf("R pos=%ld lc=%.4f\n", stepper.currentPosition(), w);  // R=Result
+    if (sl == "cal preset save") {
+      lockCfg();
+      int n = lc_countUsed();
+      bool ok = lc_userPresetSave();
+      unlockCfg();
+      if (!ok) {
+        Serial.printf("[LC] Preset not saved — need at least 2 cal points (have %d).\n", n);
+        return;
+      }
+      Serial.printf("[LC] User preset saved (%d points). 'cal preset' will restore this table.\n", n);
+      lc_printMatrix();
       return;
     }
-    if (sl == "read lc raw") { Serial.printf("[LC] raw=%.2f\n", lc_read_raw(5)); return; }
-    if (sl == "lc raw on")  { g_lcRawMode = true;  Serial.println(F("[LC] Raw mode ON — streaming raw ADC counts.")); return; }
-    if (sl == "lc raw off") { g_lcRawMode = false; Serial.println(F("[LC] Raw mode OFF — streaming calibrated units.")); return; }
-    
+    if (sl == "cal preset factory") {
+      lockCfg();
+      lc_userPresetForget();
+      lc_loadFactoryPreset();
+      lc_applyCalibration();
+      unlockCfg();
+      Serial.println(F("[LC] Factory preset loaded (compiled-in table). User snapshot forgotten."));
+      lc_printMatrix();
+      return;
+    }
+    if (sl == "cal preset") {
+      lockCfg();
+      bool fromUser = lc_userPresetLoad();
+      if (!fromUser) lc_loadFactoryPreset();
+      lc_applyCalibration();
+      unlockCfg();
+      Serial.println(fromUser
+        ? F("[LC] Restored user-saved preset.")
+        : F("[LC] No user preset saved — loaded compiled-in factory table."));
+      lc_printMatrix();
+      return;
+    }
+    if (sl == "cal clear") { lockCfg(); lc_clearCalibration(); unlockCfg(); Serial.println(F("[LC] Cleared.")); return; }
+
+    Serial.println(F("Unknown FIXTURE command. Type 'help'."));
+    return;
+  }
+
+  // ------------------------------------------------------------------
+  // ADJUSTMENTS mode — test setup (positions, servo, seek, break-beams)
+  // ------------------------------------------------------------------
+  if (currentMode == Mode::ADJUSTMENTS) {
+    if (sl.startsWith("setpos ")) {
+      String args = sl.substring(7); args.trim();
+      if (args.length() < 2 || args.charAt(0) != 'x') { Serial.println(F("Usage: setpos XA..XE [<steps>]")); return; }
+      int idx = namedPosIdx(args.charAt(1));
+      if (idx < 0) { Serial.println(F("Use XA..XE.")); return; }
+      long pos = (args.length() > 3) ? args.substring(3).toInt() : stepper.currentPosition();
+      lockCfg(); cfg.namedPositions[idx] = pos; cfg.namedPosSet[idx] = true; unlockCfg();
+      Serial.printf("[ADJ] X%c = %ld\n", 'A'+idx, pos);
+      return;
+    }
+    if (sl == "listpos") {
+      lockCfg();
+      for (int i = 0; i < NUM_NAMED_POS; i++) {
+        if (cfg.namedPosSet[i]) Serial.printf("  X%c = %ld\n", 'A'+i, cfg.namedPositions[i]);
+        else                    Serial.printf("  X%c = (unset)\n", 'A'+i);
+      }
+      unlockCfg(); return;
+    }
+
     // read bb | read bb1 | read bb2
     if (sl.startsWith("read bb")) {
       String args = sl.substring(5); args.trim();   // "bb", "bb1", "bb2"
@@ -2379,15 +2957,6 @@ void handleCommand(const String &rawLine) {
       String args;
       if (sl.length() > 5) { args = sl.substring(5); args.trim(); }
       handleServoCommand(args);
-      return;
-    }
-    if (sl == "seek stop") {
-      g_adjSeekActive    = false;
-      g_velocitySeekMode = false;
-      g_velocityCommand  = 0.f;
-      stepper.stop();
-      memset(&g_seekRT, 0, sizeof g_seekRT);
-      Serial.println(F("[ADJ] Seek stopped."));
       return;
     }
     if (sl.startsWith("seek force ")) {
@@ -2481,15 +3050,26 @@ void handleCommand(const String &rawLine) {
         Serial.println(F("[TEST]   Add matching ENDIF/ENDFOR/ENDWHILE before starting."));
       }
       resetLoopCounters();
+      // Absolute target: keep cyclesDone; only update the goal.
       cyclesGoal      = n;
-      cyclesDone      = 0;
       currentStepIdx  = 0;
       stepInitialized = false;
       lcLimitTrip     = false;
-      runState        = RunState::RUNNING;
+      saveCycleProgress();
+      reportCycleProgress();
 
-      Serial.printf("[TEST] START %d cycle(s)", n);
-      LINK_UART.printf("R cyc=%d/%d \n", cyclesDone, cyclesGoal);
+      if (cyclesDone >= cyclesGoal) {
+        runState = RunState::COMPLETE;
+        stepper.stop();
+        Serial.printf("[TEST] Already at/above target (%d / %d). Use 'cycles reset' or raise target.\n",
+                      cyclesDone, cyclesGoal);
+        LINK_UART.println("S complete");
+        return;
+      }
+
+      runState = RunState::RUNNING;
+      Serial.printf("[TEST] START toward absolute target %d (now %d / %d)",
+                    cyclesGoal, cyclesDone, cyclesGoal);
       switch (profileMode) {
         case ProfileMode::ALL:      Serial.println(" — LC on all cycles"); break;
         case ProfileMode::EVERY_N:  Serial.printf(" — LC every %d cycle(s)\n", profileEveryN); break;
@@ -2517,13 +3097,35 @@ void handleCommand(const String &rawLine) {
     if (sl == "stop") {
       stepper.stop();
       runState = RunState::IDLE;
-      cyclesDone = 0;
+      // Keep cyclesDone / cyclesGoal — only 'cycles reset' clears progress
       currentStepIdx = 0;
       g_adjSeekActive    = false;
       g_velocitySeekMode = false;
       g_velocityCommand  = 0.f;
       memset(&g_seekRT, 0, sizeof g_seekRT);
-      Serial.println(F("[TEST] STOPPED."));
+      saveCycleProgress();
+      reportCycleProgress();
+      Serial.printf("[TEST] STOPPED at %d / %d.\n", cyclesDone, cyclesGoal);
+      return;
+    }
+    if (sl == "cycles") {
+      Serial.printf("[TEST] Cycles: %d / %d\n", cyclesDone, cyclesGoal);
+      reportCycleProgress();
+      return;
+    }
+    if (sl == "cycles reset") {
+      cyclesDone = 0;
+      currentStepIdx = 0;
+      stepInitialized = false;
+      if (runState == RunState::RUNNING || runState == RunState::PAUSED) {
+        stepper.stop();
+        runState = RunState::IDLE;
+      } else if (runState == RunState::COMPLETE) {
+        runState = RunState::IDLE;
+      }
+      saveCycleProgress();
+      reportCycleProgress();
+      Serial.printf("[TEST] Cycle count reset to 0 / %d.\n", cyclesGoal);
       return;
     }
     if (sl == "status") { printStatus(); return; }
@@ -2615,7 +3217,8 @@ void tickTestExecution() {
   if (currentStepIdx >= numSteps) {
     cyclesDone++;
     Serial.printf("[TEST] Cycle %d / %d complete.\n", cyclesDone, cyclesGoal);
-    LINK_UART.printf("R cyc=%d/%d \n", cyclesDone, cyclesGoal);
+    saveCycleProgress();
+    reportCycleProgress();
     if (cyclesDone >= cyclesGoal) {
       runState = RunState::COMPLETE; stepper.stop();
       Serial.println(F("[TEST] All cycles complete."));
@@ -2897,6 +3500,19 @@ void tickTestExecution() {
       Serial.printf("[TEST] Step %d: Pos=%ld LC=%.4f\n", currentStepIdx, pos, val);
       LINK_UART.printf("R R pos=%ld lc=%.4f\n", pos, val);  // R = Result (stationary read)
 
+      // The [TEST] banner is not a data record. Profiles and position-triggered
+      // reads log this same line, which the serial monitor stores as
+      // cycle / device time / position / force. Emit it for this stationary
+      // point too, and only on cycles selected by "LC every" / "LC cycles".
+      if (lcActiveThisCycle()) {
+        if (g_lcRawMode) {
+          Serial.printf("[CAL] pos=%ld raw=%.2f\n", pos, val);
+        } else {
+          Serial.printf("%lu,  %d,  %ld, %.4f\n",
+                        (unsigned long)millis(), cyclesDone, pos, val);
+        }
+      }
+
       if (step.checkLimits) {
         lockCfg();
         bool limitsOn = cfg.lc_limitsOn;
@@ -2982,6 +3598,7 @@ void tickTestExecution() {
 
 void taskLcSample(void *pv) {
   TickType_t lastWake = xTaskGetTickCount();
+  bool lcWasSampling = false;
 
   for (;;) {
     // ---- Decide whether we need to sample at all ----
@@ -3003,10 +3620,22 @@ void taskLcSample(void *pv) {
     }
 
     if (!needSample) {
+      if (lcWasSampling && lcBadFrames) {
+        Serial.printf("[LC] skipped %lu implausible HX711 frames this move\n",
+                      (unsigned long)lcBadFrames);
+        lcBadFrames = 0;
+      }
+      lcWasSampling = false;
       // Idle — sleep cheaply without touching the HX711
       vTaskDelay(pdMS_TO_TICKS(20));
       lastWake = xTaskGetTickCount();  // resync so vTaskDelayUntil won't catchup burst
       continue;
+    }
+
+    if (!lcWasSampling) {
+      lc_expectReset();
+      lcBadFrames = 0;
+      lcWasSampling = true;
     }
 
     // ---- Determine sample period ----
@@ -3018,9 +3647,23 @@ void taskLcSample(void *pv) {
 
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(per));
 
-    // ---- Take one sample (blocks for one HX711 conversion on this task) ----
+    // ---- One HX711 conversion, only if a result is waiting ----
+    float raw;
+    if (!lc_readRawIfReady(raw)) {
+      continue;  // conversion not due yet — not a dropped-bad-frame
+    }
+    if (!lc_rawElectricallyValid(raw)) {
+      lcBadFrames++;
+      continue;
+    }
+    if (g_lcRawMode && !lc_rawFramingPlausible(raw)) {
+      lcBadFrames++;
+      continue;
+    }
+    if (g_lcRawMode) lc_expectPush(raw);
+
     long  pos = stepper.currentPosition();
-    float val = g_lcRawMode ? lc_read_raw(1) : lc_read(1);
+    float val = lc_rawToPublished(raw);
     lastLcValue = val;
 
     // Write to cache — consumed non-blocking by taskControl
@@ -3059,9 +3702,9 @@ void taskStepper(void *pv) {
       stepper.run();
     }
 
-    // ---- Jog position reporting (ADJUSTMENTS mode) ----
+    // ---- Jog position reporting (FIXTURE / ADJUSTMENTS) ----
     // All Serial work is done by Core 1 — we only write to volatiles here.
-    if (currentMode == Mode::ADJUSTMENTS) {
+    if (currentMode == Mode::ADJUSTMENTS || currentMode == Mode::FIXTURE) {
       long pos = stepper.currentPosition();
       bool moving = (stepper.distanceToGo() != 0);
 
@@ -3116,7 +3759,7 @@ void taskControl(void *pv) {
     if (readLink(linkLine)) handleCommand(linkLine);
 
     // ---- Jog position reporting (reads volatile set by Core 0) ----
-    if (currentMode == Mode::ADJUSTMENTS) {
+    if (currentMode == Mode::ADJUSTMENTS || currentMode == Mode::FIXTURE) {
       // Mid-move periodic update (every ~50 steps)
       long rpt = jogReportPos;
       if (rpt != LONG_MIN) {
@@ -3199,14 +3842,28 @@ void setup() {
   if (loadSequence()) Serial.printf("Sequence restored from NVS (%d steps).\n", numSteps);
   else                Serial.println(F("No saved sequence found."));
 
+  if (loadCycleProgress()) {
+    Serial.printf("Cycle progress restored from NVS: %d / %d\n", cyclesDone, cyclesGoal);
+  } else {
+    Serial.println(F("No saved cycle progress — starting at 0 / 1."));
+  }
+
+  if (loadLcZeroOffset()) {
+    Serial.printf("LC zero offset restored from NVS: %.4f\n", (float)g_lcZeroOffset);
+  } else {
+    Serial.println(F("No saved LC zero offset — using 0."));
+  }
+
   if (ENABLE_PIN >= 0) { pinMode(ENABLE_PIN, OUTPUT); enableMotor(true); }
   stepper.setMinPulseWidth(20);                              
   stepper.setMaxSpeed(cfg.maxSpeed_sps);
   stepper.setAcceleration(cfg.accel_sps2);
   stepper.setCurrentPosition(0);
 
-  // HX711 electrical rate: module RATE pin (or jumper) selects ~10 vs ~80 SPS; match library 3rd arg to wiring.
-  lc.begin(LC_DT_PIN, LC_SCK_PIN, false);
+  // 3rd arg is HX711_MP fastProcessor (1 us clock delays), NOT 10/80 SPS.
+  // ESP32 edges are faster than the HX711 T2 spec unless this is true — false
+  // clocks in all-ones (-1), half-scale, and ~10k collapsed frames.
+  lc.begin(LC_DT_PIN, LC_SCK_PIN, true);
   lc.reset();
   bool anyCal = false;
   for (int i = 0; i < LC_INDEX_SIZE; i++) if (cfg.lc_calUsed[i]) { anyCal = true; break; }
@@ -3233,6 +3890,7 @@ void setup() {
   xTaskCreatePinnedToCore(taskLcSample, "LcSamp", 3072, nullptr, 2, &taskLcSampleHandle, 1);
 
   LINK_UART.println("S ready");   // S = State change; lets the display ESP32 know the fixture is up
+  reportCycleProgress();          // refresh hat cycle display after reboot
 }
 
 void loop() { vTaskDelay(portMAX_DELAY); }
