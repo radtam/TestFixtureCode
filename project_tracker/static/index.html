@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cycle Test Code Tracker</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <p class="eyebrow">CYCLE TEST MACHINE</p>
+      <h1>Code Work Tracker</h1>
+    </div>
+    <div class="header-actions">
+      <button class="button secondary" id="backupButton" type="button">Create backup</button>
+      <button class="button secondary" id="importButton" type="button">Import JSON</button>
+      <button class="button primary" id="newProjectButton" type="button">New project</button>
+      <input id="importFile" type="file" accept="application/json,.json" hidden>
+    </div>
+  </header>
+
+  <main>
+    <section id="dashboardView">
+      <div class="summary-grid" aria-label="Project summary">
+        <article class="summary-card"><span>Active projects</span><strong id="activeCount">0</strong></article>
+        <article class="summary-card"><span>Tasks completed</span><strong id="completedTaskCount">0</strong></article>
+        <article class="summary-card warning"><span>Overdue tasks</span><strong id="overdueCount">0</strong></article>
+        <article class="summary-card"><span>Average progress</span><strong id="averageProgress">0%</strong></article>
+      </div>
+
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">YOUR WORK</p>
+          <h2>Projects</h2>
+        </div>
+        <div class="filters">
+          <label class="search-field">
+            <span class="sr-only">Search projects</span>
+            <input id="searchInput" type="search" placeholder="Search projects">
+          </label>
+          <label class="check-label">
+            <input id="showArchived" type="checkbox">
+            Show archived
+          </label>
+        </div>
+      </div>
+
+      <div id="projectGrid" class="project-grid"></div>
+      <div id="emptyState" class="empty-state" hidden>
+        <div class="empty-icon">+</div>
+        <h3>No projects yet</h3>
+        <p>Capture the problem, requirements, and context for each code change so you can hand it to AI when you are ready.</p>
+        <button class="button primary" id="emptyNewButton" type="button">Create first project</button>
+      </div>
+    </section>
+
+    <section id="editorView" hidden>
+      <div class="editor-toolbar">
+        <button class="text-button" id="backButton" type="button">← Back to projects</button>
+        <div class="editor-actions">
+          <span id="saveState" class="save-state">Not saved</span>
+          <button class="button secondary" id="copyBriefButton" type="button">Copy AI brief</button>
+          <button class="button secondary" id="exportButton" type="button">Export JSON</button>
+          <button class="button primary" id="saveButton" type="button">Save project</button>
+          <button class="more-button" id="moreButton" type="button" aria-expanded="false" aria-label="More project actions">•••</button>
+          <div class="action-menu" id="actionMenu" hidden>
+            <button id="duplicateButton" type="button">Duplicate project</button>
+            <button id="archiveButton" type="button">Archive project</button>
+            <button id="deleteButton" class="danger-text" type="button">Delete project</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="project-title-row">
+        <div>
+          <p class="eyebrow" id="editorProjectId">NEW PROJECT</p>
+          <h2 id="editorTitle">Project intake</h2>
+        </div>
+        <div class="progress-ring" id="progressRing" aria-label="Project progress">
+          <strong id="editorProgress">0%</strong>
+          <span>complete</span>
+        </div>
+      </div>
+
+      <nav class="tabs" aria-label="Project sections">
+        <button class="tab active" data-tab="overview" type="button">Overview</button>
+        <button class="tab" data-tab="tasks" type="button">Tasks <span id="taskTabCount" class="count-pill">0</span></button>
+        <button class="tab" data-tab="timeline" type="button">Timeline</button>
+      </nav>
+
+      <form id="projectForm">
+        <section class="tab-panel" id="overviewPanel">
+          <div class="panel-card">
+            <div class="panel-heading">
+              <div><p class="eyebrow">INTAKE</p><h3>Project details</h3></div>
+              <p>Fields marked * are required.</p>
+            </div>
+            <div class="form-grid">
+              <label class="field span-2">Project name *
+                <input name="name" required maxlength="200" placeholder="Example: Persist current cycle count on ESP32">
+              </label>
+              <label class="field">Project ID
+                <input name="id" maxlength="64" pattern="[a-z0-9][a-z0-9-]{0,63}" placeholder="Created from project name">
+                <small>Lowercase letters, numbers, and hyphens</small>
+              </label>
+              <label class="field">Status
+                <select name="status">
+                  <option value="planning">Planning</option>
+                  <option value="active">Active</option>
+                  <option value="on_hold">On hold</option>
+                  <option value="complete">Complete</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
+              <label class="field">Owner
+                <input name="owner" maxlength="100" placeholder="Person responsible">
+              </label>
+              <label class="field">Request date
+                <input name="requestDate" type="date">
+              </label>
+              <label class="field">Target completion date
+                <input name="targetDate" type="date">
+              </label>
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">AI HANDOFF</p>
+                <h3>Problem and context</h3>
+              </div>
+              <p>Fill this in so you can paste a complete brief into Cursor or another AI later.</p>
+            </div>
+            <div class="form-grid">
+              <label class="field span-2">Problem
+                <textarea name="problem" rows="4" placeholder="What is broken, missing, or unclear? What should change?"></textarea>
+              </label>
+              <label class="field span-2">Requirements
+                <textarea name="requirements" rows="4" placeholder="What must the finished change do? Include must-haves and nice-to-haves."></textarea>
+              </label>
+              <label class="field span-2">Context for AI
+                <textarea name="context" rows="5" placeholder="Background, current behavior, related decisions, edge cases, or anything else an AI should know before coding."></textarea>
+              </label>
+              <label class="field span-2">Relevant files / paths
+                <textarea name="relevantFiles" rows="3" placeholder="One path or file per line, e.g. TestFixtureV5.5/TestFixtureV7.ino"></textarea>
+              </label>
+              <label class="field span-2">Acceptance criteria
+                <textarea name="acceptanceCriteria" rows="3" placeholder="How will you know the change works? What should you be able to verify?"></textarea>
+              </label>
+              <label class="field span-2">Constraints
+                <textarea name="constraints" rows="2" placeholder="Limits, compatibility needs, performance, safety, or things that must not change"></textarea>
+              </label>
+              <label class="field span-2">Hardware / fixture notes (optional)
+                <textarea name="hardwareNotes" rows="2" placeholder="Only if this change depends on a specific fixture, sensor, or physical setup"></textarea>
+              </label>
+              <label class="field span-2">General notes
+                <textarea name="notes" rows="3" placeholder="Working notes, decisions, or reminders for yourself"></textarea>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tasksPanel" hidden>
+          <div class="task-summary" id="phaseSummary"></div>
+          <div class="panel-card">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">OPTIONAL CHECKLIST</p>
+                <h3>Project tasks</h3>
+                <p class="panel-note">Use these if they help you remember where you are. Delete any you do not need.</p>
+              </div>
+              <button class="button secondary" id="addTaskButton" type="button">Add task</button>
+            </div>
+            <div id="taskList" class="task-list"></div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="timelinePanel" hidden>
+          <div class="timeline-layout">
+            <div class="panel-card">
+              <div class="panel-heading"><div><p class="eyebrow">SCHEDULE</p><h3>Upcoming work</h3></div></div>
+              <div id="upcomingList" class="upcoming-list"></div>
+            </div>
+            <div class="panel-card">
+              <div class="panel-heading"><div><p class="eyebrow">ACTIVITY</p><h3>Project history</h3></div></div>
+              <ol id="historyList" class="history-list"></ol>
+            </div>
+          </div>
+        </section>
+      </form>
+    </section>
+  </main>
+
+  <template id="taskTemplate">
+    <article class="task-row">
+      <div class="task-order">
+        <button type="button" data-action="up" aria-label="Move task up">↑</button>
+        <button type="button" data-action="down" aria-label="Move task down">↓</button>
+      </div>
+      <label class="task-status-label">
+        <span class="sr-only">Task status</span>
+        <select data-field="status">
+          <option value="pending">Pending</option>
+          <option value="in_progress">In progress</option>
+          <option value="blocked">Blocked</option>
+          <option value="done">Done</option>
+        </select>
+      </label>
+      <div class="task-fields">
+        <input class="task-title" data-field="title" maxlength="200" placeholder="Task title">
+        <div class="task-meta">
+          <input data-field="phase" maxlength="100" placeholder="Phase">
+          <input data-field="owner" maxlength="100" placeholder="Owner">
+          <input data-field="dueDate" type="date" aria-label="Due date">
+        </div>
+        <textarea data-field="notes" rows="2" placeholder="Notes"></textarea>
+        <input class="blocked-reason" data-field="blockedReason" maxlength="1000" placeholder="Why is this blocked?" hidden>
+      </div>
+      <button class="remove-task" type="button" data-action="remove" aria-label="Remove task">×</button>
+    </article>
+  </template>
+
+  <div id="confirmModal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h3 id="confirmTitle">Are you sure?</h3>
+      <p id="confirmMessage"></p>
+      <div class="modal-actions">
+        <button class="button secondary" id="confirmNo" type="button">No</button>
+        <button class="button danger" id="confirmYes" type="button">Yes</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
